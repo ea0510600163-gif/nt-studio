@@ -1,5 +1,6 @@
 import { app, BrowserWindow, shell } from 'electron'
 import { join } from 'node:path'
+import { createContext, type AppContext } from './core/context'
 import { registerAppHandlers } from './ipc/app'
 
 const APP_ID = 'com.nt.studio'
@@ -24,7 +25,7 @@ function createMainWindow(): BrowserWindow {
     autoHideMenuBar: true,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      // إعدادات أمان غير قابلة للتفاوض: لا Node في الواجهة، وعزل كامل،
+      // إعدادات أمان غير قابلة للتفاوض: لا Node في الواجهة، عزل كامل،
       // وsandbox مفعّل (يتطلب preload بصيغة CommonJS — لذلك لا "type":"module").
       contextIsolation: true,
       nodeIntegration: false,
@@ -46,7 +47,7 @@ function createMainWindow(): BrowserWindow {
     return { action: 'deny' }
   })
 
-  // منع أي تنقل خارج حزمة التطبيق المحلية (في وضع التطوير يُسمح بخادم Vite فقط).
+  // منع أي تنقل خارج حزمة التطبيق المحلية (في التطوير يُسمح بخادم Vite فقط).
   win.webContents.on('will-navigate', (event, url) => {
     if (RENDERER_URL && url.startsWith(RENDERER_URL)) return
     event.preventDefault()
@@ -59,17 +60,34 @@ function createMainWindow(): BrowserWindow {
   return win
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   app.setAppUserModelId(APP_ID)
-  registerAppHandlers()
+
+  let ctx: AppContext
+  try {
+    ctx = await createContext()
+  } catch (e) {
+    // فشل السياق = لا نُقلع: أفضل رسالة صريحة من نافذة فارغة غامضة.
+    console.error('تعذّر تهيئة سياق التطبيق:', e)
+    app.quit()
+    return
+  }
+
+  registerAppHandlers(ctx)
   mainWindow = createMainWindow()
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) mainWindow = createMainWindow()
     else mainWindow?.focus()
   })
-})
 
-app.on('window-all-closed', () => {
-  mainWindow = null
-  if (process.platform !== 'darwin') app.quit()
+  app.on('window-all-closed', () => {
+    mainWindow = null
+    if (process.platform !== 'darwin') app.quit()
+  })
+
+  // حفظ الحالة قبل الإغلاق حتى لا تضيع آخر تعديل.
+  app.on('before-quit', () => {
+    void ctx.state.flush()
+  })
 })
