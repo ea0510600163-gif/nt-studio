@@ -1,4 +1,4 @@
-import { app } from 'electron'
+import { app, BrowserWindow } from 'electron'
 import path from 'node:path'
 import { z } from 'zod'
 import { Logger, type ScopedLogger } from './logger'
@@ -35,6 +35,8 @@ export interface AppContext {
   root: ScopedLogger
   logger: Logger
   dirs: AppDirs
+  /** النوافذ الحيّة — تُستخدم لبثّ الأحداث إلى الواجهة. */
+  browserWindows: () => BrowserWindow[]
 }
 
 const DEFAULTS: AppState = appStateSchema.parse({})
@@ -64,5 +66,11 @@ export async function createContext(): Promise<AppContext> {
     nodeEnv: process.env.NODE_ENV ?? 'production',
   })
 
-  return { state, root, logger, dirs: { userData, logs } }
+  return {
+    state,
+    root,
+    logger,
+    dirs: { userData, logs },
+    browserWindows: () => BrowserWindow.getAllWindows(),
+  }
 }

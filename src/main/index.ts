@@ -3,18 +3,23 @@ import { join } from 'node:path'
 import { createContext, type AppContext } from './core/context'
 import { registerAppHandlers } from './ipc/app'
 import { registerProviderHandlers } from './ipc/providers'
+import { registerProjectHandlers } from './ipc/projects'
+import { registerPreviewHandlers } from './ipc/preview'
+import { registerAgentHandlers } from './ipc/agent'
+import { AgentRunner } from './agent/session'
+import { PreviewController } from './preview/controller'
+import { setInspectDeps } from './agent/tools/preview'
 
 const APP_ID = 'com.nt.studio'
 const RENDERER_URL = process.env.ELECTRON_RENDERER_URL
 
 let mainWindow: BrowserWindow | null = null
 
-/** روابط مسموح فتحها في المتصفح الخارجي فقط (http/https). */
 function openExternally(url: string): void {
   if (/^https?:\/\//i.test(url)) void shell.openExternal(url)
 }
 
-function createMainWindow(): BrowserWindow {
+function createMainWindow(ctx: AppContext, preview: PreviewController, runner: AgentRunner): BrowserWindow {
   const win = new BrowserWindow({
     width: 1520,
     height: 940,
@@ -26,8 +31,6 @@ function createMainWindow(): BrowserWindow {
     autoHideMenuBar: true,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
-      // إعدادات أمان غير قابلة للتفاوض: لا Node في الواجهة، عزل كامل،
-      // وsandbox مفعّل (يتطلب preload بصيغة CommonJS — لذلك لا "type":"module").
       contextIsolation: true,
       nodeIntegration: false,
       nodeIntegrationInWorker: false,
@@ -42,23 +45,61 @@ function createMainWindow(): BrowserWindow {
 
   win.once('ready-to-show', () => win.show())
 
-  // أي نافذة جديدة تُطلب من داخل التطبيق تُمنع وتُحوَّل للمتصفح الخارجي.
   win.webContents.setWindowOpenHandler(({ url }) => {
     openExternally(url)
     return { action: 'deny' }
   })
 
-  // منع أي تنقل خارج حزمة التطبيق المحلية (في التطوير يُسمح بخادم Vite فقط).
   win.webContents.on('will-navigate', (event, url) => {
     if (RENDERER_URL && url.startsWith(RENDERER_URL)) return
     event.preventDefault()
     openExternally(url)
   })
 
+  // المعاينة عملية عرض منفصلة: نخبرها بعنوان النافذة عند كل حركة
+  win.on('resize', () => syncBounds(win, preview))
+  win.on('move', () => syncBounds(win, preview))
+
+  // إيقاف كل شيء بلطف قبل الإغلاق
+  win.on('close', () => {
+    runner.stop()
+    preview.close()
+  })
+
+  // ربط أدوات الفحص بالمعاينة الحقيقية
+  setInspectDeps({
+    screenshot: async () => (await preview.screenshot()).dataUrl ?? '',
+    consoleErrors: async () => preview.consoleErrors(),
+    evaluate: async (expression) => {
+      const res = await preview.evaluate(expression)
+      return res.ok ? (res.value ?? '') : null
+    },
+    click: async (selector) => (await preview.click(selector)).ok,
+    type: async (selector, text) => (await preview.typeText(selector, text)).ok,
+    pageInfo: async () => {
+      const url = preview.currentUrl() ?? ''
+      const res = await preview.evaluate('document.title')
+      return { url, title: res.ok ? (res.value ?? '') : '' }
+    },
+    currentUrl: async () => preview.currentUrl(),
+  })
+
+  registerAppHandlers(ctx)
+  registerProviderHandlers(ctx)
+  registerProjectHandlers(ctx)
+  registerPreviewHandlers(ctx, preview)
+  registerAgentHandlers(ctx, runner)
+
   if (RENDERER_URL) void win.loadURL(RENDERER_URL)
   else void win.loadFile(join(__dirname, '../renderer/index.html'))
 
   return win
+}
+
+function syncBounds(win: BrowserWindow, preview: PreviewController): void {
+  if (!preview.hasView()) return
+  const [w, h] = win.getContentSize()
+  preview.applyBounds({ x: 0, y: 0, width: w ?? 800, height: h ?? 600 })
 }
 
 app.whenReady().then(async () => {
@@ -68,18 +109,18 @@ app.whenReady().then(async () => {
   try {
     ctx = await createContext()
   } catch (e) {
-    // فشل السياق = لا نُقلع: أفضل رسالة صريحة من نافذة فارغة غامضة.
-    console.error('تعذّر تهيئة سياق التطبيق:', e)
+    console.error('Failed to initialize app context:', e)
     app.quit()
     return
   }
 
-  registerAppHandlers(ctx)
-  registerProviderHandlers(ctx)
-  mainWindow = createMainWindow()
+  const preview = new PreviewController(ctx)
+  const runner = new AgentRunner(ctx)
+
+  mainWindow = createMainWindow(ctx, preview, runner)
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) mainWindow = createMainWindow()
+    if (BrowserWindow.getAllWindows().length === 0) mainWindow = createMainWindow(ctx, preview, runner)
     else mainWindow?.focus()
   })
 
@@ -88,8 +129,9 @@ app.whenReady().then(async () => {
     if (process.platform !== 'darwin') app.quit()
   })
 
-  // حفظ الحالة قبل الإغلاق حتى لا تضيع آخر تعديل.
   app.on('before-quit', () => {
+    runner.stop()
     void ctx.state.flush()
   })
 })
+
