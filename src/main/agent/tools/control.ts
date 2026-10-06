@@ -1,5 +1,7 @@
 import type { Phase, PlanStep, ToolResult, ToolSpec } from '../types'
 import { truncate } from '../types'
+import { readPackageJson } from './fs-scan'
+import { execCommand } from './exec'
 
 /**
  * أدوات التحكّم.
@@ -153,13 +155,11 @@ export const controlTools: ToolSpec[] = [
     async execute(args, t): Promise<ToolResult> {
       const root = t.projectRoot
       if (!root) throw new Error('No open project')
-      const { readPackageJson } = await import('./fs-scan')
       const pkg = await readPackageJson(root)
       const script = pkg?.scripts?.test
       if (!script) return { ok: true, text: 'No test script defined in package.json.', ui: 'لا اختبارات' }
 
       const timeoutMs = Math.min(Number(args.timeoutMs ?? 180_000) || 180_000, 600_000)
-      const { execCommand } = await import('./exec')
       t.emit({ type: 'status', phase: 'inspecting', detail: 'تشغيل الاختبارات' })
       const out = await execCommand(`npm test --silent`, root, timeoutMs, t)
       return {

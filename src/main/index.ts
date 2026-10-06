@@ -105,6 +105,18 @@ function syncBounds(win: BrowserWindow, preview: PreviewController): void {
 app.whenReady().then(async () => {
   app.setAppUserModelId(APP_ID)
 
+  /* نسخة واحدة فقط: نسختان تتعارضان على state.json وعلى منفذ المعاينة */
+  if (!app.requestSingleInstanceLock()) {
+    app.quit()
+    return
+  }
+  app.on('second-instance', () => {
+    const win = mainWindow
+    if (!win || win.isDestroyed()) return
+    if (win.isMinimized()) win.restore()
+    win.focus()
+  })
+
   let ctx: AppContext
   try {
     ctx = await createContext()

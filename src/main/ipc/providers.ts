@@ -2,7 +2,9 @@ import { z } from 'zod'
 import type { AppContext } from '../core/context'
 import {
   addProvider,
+  decryptKeyOf,
   fetchModels,
+  findProvider,
   listProviders,
   probeConnection,
   recordTest,
@@ -110,7 +112,6 @@ export function registerProviderHandlers(ctx: AppContext): void {
     channel: 'providers:testSaved',
     input: z.object({ id: z.string() }),
     handler: async ({ id }): Promise<TestResult> => {
-      const { findProvider, decryptKeyOf } = await import('../core/providers')
       const record = findProvider(ctx, id)
       if (!record) throw new Error('المزوّد غير موجود')
       const apiKey = decryptKeyOf(ctx, record)

@@ -3,6 +3,12 @@ import path from 'node:path'
 import { assertAllowed, assertSafeName, normalize } from '../../core/paths'
 import type { ToolResult, ToolSpec } from '../types'
 import { truncate } from '../types'
+import { execCommand } from './exec'
+
+import { startDevServer, stopDevServer } from './devserver'
+
+import { listRelativeFiles } from './fs-scan'
+
 
 /**
  * أدوات المشروع.
@@ -172,7 +178,6 @@ export const projectTools: ToolSpec[] = [
       linesOut.push(`.git: ${(await dirExists(path.join(root, '.git'))) ? 'present' : 'absent'}`)
 
       const files: string[] = []
-      const { listRelativeFiles } = await import('./fs-scan')
       await listRelativeFiles(root, files)
       linesOut.push(`files: ${files.length}`)
       linesOut.push(files.slice(0, 60).join('\n'))
@@ -208,7 +213,6 @@ export const projectTools: ToolSpec[] = [
       if (!(await dirExists(cwd))) throw new Error(`Working directory does not exist: ${cwd}`)
 
       const timeoutMs = Math.min(Number(args.timeoutMs ?? 120_000) || 120_000, 600_000)
-      const { execCommand } = await import('./exec')
       const out = await execCommand(command, cwd, timeoutMs, t)
       return {
         ok: out.code === 0,
@@ -250,7 +254,6 @@ export const projectTools: ToolSpec[] = [
       else command = packages.length ? `npm install ${packages.join(' ')}` : 'npm install'
 
       t.emit({ type: 'status', phase: 'installing', detail: command })
-      const { execCommand } = await import('./exec')
       const out = await execCommand(command, root, 600_000, t)
       if (out.code !== 0) {
         throw new Error(
@@ -279,7 +282,6 @@ export const projectTools: ToolSpec[] = [
     async execute(args, t): Promise<ToolResult> {
       const root = t.projectRoot
       if (!root) throw new Error('No open project')
-      const { startDevServer } = await import('./devserver')
 
       const preferred = Number(args.port ?? 0) || undefined
       const result = await startDevServer({
@@ -305,7 +307,6 @@ export const projectTools: ToolSpec[] = [
     description: 'Stop the project dev server started earlier.',
     inputSchema: { type: 'object', properties: {} },
     async execute(_args, t): Promise<ToolResult> {
-      const { stopDevServer } = await import('./devserver')
       const stopped = await stopDevServer(t.ctx)
       return { ok: true, text: stopped ? 'Dev server stopped.' : 'No dev server was running.' }
     },

@@ -3,6 +3,8 @@ import { createServer } from 'node:net'
 import type { AppContext } from '../../core/context'
 import type { ToolContext } from '../types'
 import { detectProjectKind, readPackageJson } from './fs-scan'
+import { serveStatic } from './static-server'
+
 
 /**
  * مدير خادم التطوير.
@@ -97,7 +99,6 @@ export async function startDevServer(opts: StartOptions): Promise<StartResult> {
     // (file:// يمنع جلب الوحدات عبر ESM، ويفشل معه كل تطبيق حديث)
     const port = await findFreePort(opts.preferredPort)
     const url = `http://127.0.0.1:${port}`
-    const { serveStatic } = await import('./static-server')
     const stop = await serveStatic(opts.cwd, port, opts.ctx)
     servers.set('static', {
       child: null,
