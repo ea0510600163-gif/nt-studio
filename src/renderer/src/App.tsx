@@ -2,74 +2,112 @@ import { useEffect, useState } from 'react'
 import type { AppInfo } from '../../shared/api'
 import type { ProviderPublic } from '../../shared/providers'
 import ProvidersScreen from './components/ProvidersScreen'
+import ProjectPicker from './components/ProjectPicker'
+import ChatPanel from './components/ChatPanel'
+import { useWorkspace } from './stores/workspace'
 
 /**
- * S3 — التوجيه: أول تشغيل ⇒ شاشة المزوّدات. بعدها ⇒ مساحة العمل
- * (تُبنى بالكامل في S7؛ هنا-placeholders واضحة لا واجهات وهمية).
+ * جذر التطبيق.
+ *
+ * التوجيه بسيط ومقصود — لا مكتبة توجيه لثلاث شاشات فقط.
+ * ثلاث حالات: إعداد (لا مزوّد) ← اختيار مشروع ← مساحة عمل.
  */
+
+type Screen = 'providers' | 'workspace'
+
 export default function App(): React.JSX.Element {
   const [info, setInfo] = useState<AppInfo | null>(null)
   const [providers, setProviders] = useState<ProviderPublic[] | null>(null)
-  const [showSettings, setShowSettings] = useState(false)
+  const [screen, setScreen] = useState<Screen>('providers')
+
+  const { setProjects, projects, projectPath, setProject, setActive } = useWorkspace()
 
   useEffect(() => {
     window.studio.app.info().then(setInfo).catch(() => undefined)
-    window.studio.providers.list().then(setProviders).catch(() => setProviders([]))
-  }, [])
+
+    void (async () => {
+      const list = await window.studio.providers.list()
+      setProviders(list)
+      setScreen(list.length === 0 ? 'providers' : 'workspace')
+
+      const first = list[0]
+      if (first) {
+        const model = first.models[0] ?? null
+        setActive(first.id, model)
+        if (model) await window.studio.providers.setActive(first.id, model)
+      }
+
+      setProjects(await window.studio.providers.listProjects())
+    })()
+  }, [setActive, setProjects])
+
+  /* المكوّن نفسه يتولّى تمرير حدوده إلى العملية الرئيسية */
 
   if (providers === null) {
-    return (
-      <div className="grid h-full place-items-center bg-app text-[13px] text-faint">جارٍ التحميل…</div>
-    )
+    return <div className="grid h-full place-items-center bg-app text-[13px] text-faint">جارٍ التحميل…</div>
   }
 
-  const firstRun = providers.length === 0
-  if (firstRun || showSettings) {
+  if (screen === 'providers' || providers.length === 0) {
     return (
       <ProvidersScreen
         providers={providers}
-        onChanged={setProviders}
-        onClose={firstRun ? undefined : () => setShowSettings(false)}
+        onChanged={(list) => {
+          setProviders(list)
+          if (list.length > 0) {
+            const first = list[0]
+            if (first) {
+              setActive(first.id, first.models[0] ?? null)
+              setScreen('workspace')
+            }
+          }
+        }}
+      />
+    )
+  }
+
+  if (!projectPath) {
+    return (
+      <ProjectPicker
+        projects={projects}
+        version={info?.version ?? ''}
+        onOpen={(path) => {
+          setProject(path)
+          setScreen('workspace')
+        }}
+        onProviders={() => setScreen('providers')}
       />
     )
   }
 
   return (
     <div className="flex h-full flex-col bg-app">
-      <header className="flex h-12 shrink-0 items-center gap-3 border-b border-line bg-panel px-4">
-        <span className="text-[13.5px] font-medium">NT Studio</span>
-        <span className="rounded-md bg-success/15 px-2 py-0.5 text-[11px] text-success">جاهز</span>
-        <div className="flex-1" />
-        <span className="font-mono text-[11px] text-faint" dir="ltr">
-          {info ? `electron ${info.electron} · node ${info.node}` : ''}
-        </span>
+      <header className="flex h-11 shrink-0 items-center gap-3 border-b border-line bg-panel px-4">
         <button
           type="button"
-          onClick={() => setShowSettings(true)}
-          className="h-8 rounded-lg border border-line px-3 text-[12px] text-dim hover:bg-panel2 hover:text-main"
+          onClick={() => setScreen('providers')}
+          className="text-[12.5px] text-mute hover:text-main"
         >
-          المزوّدات
+          ← المزوّدات
         </button>
+        <div className="h-3 w-px bg-line" />
+        <span className="truncate text-[12.5px] text-main">
+          {projects.find((p) => p.path === projectPath)?.name ?? 'مشروع'}
+        </span>
+        <div className="flex-1" />
+        <button
+          type="button"
+          onClick={() => setProject(null)}
+          className="h-7 rounded-lg border border-line px-2.5 text-[11.5px] text-mute hover:bg-panel2 hover:text-main"
+        >
+          كل المشاريع
+        </button>
+        <span className="font-mono text-[10.5px] text-faint" dir="ltr">
+          {info ? `v${info.version}` : ''}
+        </span>
       </header>
 
-      <div className="grid flex-1 place-items-center px-6">
-        <div className="max-w-md text-center">
-          <div className="mx-auto mb-4 grid h-11 w-11 place-items-center rounded-xl border border-line bg-panel2">
-            <span className="text-[18px]">◍</span>
-          </div>
-          <h2 className="text-[15px] font-medium">مساحة العمل جاهزة للانطلاق</h2>
-          <p className="mt-2 text-[13px] leading-relaxed text-mute">
-            اختُبرت المزوّدات وبقي بناء {`محرك الوكيل (S4)، مدير المشاريع (S5)، والمعاينة والفحص (S6)`}.
-            هذه المراحل هي التي تحوّل الطلب إلى مشروع حقيقي.
-          </p>
-          <div className="mt-4 flex flex-wrap items-center justify-center gap-1.5 text-[11px]">
-            {providers.map((p) => (
-              <span key={p.id} className="rounded-md border border-line bg-panel2 px-2 py-1 text-mute">
-                {p.name} · {p.models.length} نموذج
-              </span>
-            ))}
-          </div>
-        </div>
+      <div className="min-h-0 flex-1">
+        <ChatPanel />
       </div>
     </div>
   )

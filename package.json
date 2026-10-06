@@ -13,9 +13,11 @@
     "dev": "electron-vite dev",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
-    "build": "npm run typecheck && electron-vite build",
+    "check:encoding": "node scripts/check-encoding.mjs",
+    "build": "npm run typecheck && npm run check:encoding && electron-vite build",
     "test": "vitest run",
     "test:watch": "vitest",
+    "verify": "npm run typecheck && npm run check:encoding && npm test && electron-vite build",
     "dist": "npm run build && electron-builder --win --publish never",
     "dist:dir": "npm run build && electron-builder --win --dir --publish never"
   },

@@ -53,6 +53,8 @@ const bridge: StudioBridge = {
   },
 
   preview: {
+    onUrl: (cb: (url: string | null) => void) =>
+      subscribe<{ url: string | null }>('preview:url', (payload) => cb(payload.url)),
     open: (url) => invoke('preview:open', { url }),
     close: () => invoke('preview:close', undefined),
     status: () => invoke('preview:status', undefined),
@@ -63,6 +65,9 @@ const bridge: StudioBridge = {
     typeText: (selector, text) => invoke('preview:type', { selector, text }),
     reload: () => invoke('preview:reload', undefined),
     setViewport: (size) => invoke('preview:setViewport', { size }),
+    attach: (bounds) => invoke('preview:attach', { bounds }),
+    resize: (bounds) => invoke('preview:resize', { bounds }),
+    openExternal: (url) => invoke('preview:openExternal', { url }),
   },
 }
 

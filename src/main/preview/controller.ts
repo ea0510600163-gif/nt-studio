@@ -32,6 +32,8 @@ interface PreviewState {
   url: string | null
   logs: ConsoleEntry[]
   viewport: { width: number; height: number } | null
+  /** آخر حدود مرسلة من الواجهة — تُستخدم عند ضبط حجم النافذة. */
+  bounds: { x: number; y: number; width: number; height: number } | null
 }
 
 const ALLOWED_PROTOCOLS = new Set(['http:', 'https:', 'file:'])
@@ -43,6 +45,7 @@ export class PreviewController {
     url: null,
     logs: [],
     viewport: null,
+    bounds: null,
   }
 
   constructor(private readonly ctx: AppContext) {}
@@ -89,6 +92,8 @@ export class PreviewController {
       this.state.view = view
     }
     this.state.window = win
+    // حدود الـ view تتبع موضع العنصر الذي ترسله الواجهة (بوحدات CSS)
+    this.state.bounds = { ...bounds }
     win.contentView.addChildView(this.state.view)
     this.applyBounds(bounds)
   }
@@ -105,10 +110,20 @@ export class PreviewController {
     }
     this.state.view = null
     this.state.window = null
+    this.state.bounds = null
+  }
+
+  /** يرسل عنوان URL الجديد للواجهة (المعاينة تعمل خارج نطاق React). */
+  private broadcastUrl(url: string | null): void {
+    const win = this.state.window
+    if (!win || win.isDestroyed()) return
+    win.webContents.send('preview:url', { url })
   }
 
   applyBounds(bounds: { x: number; y: number; width: number; height: number }): void {
     if (!this.state.view) return
+    // electrton's WebContentsView expects device-independent pixels with the
+    // origin at the top-left of the window content area (same as CSS rects)
     this.state.view.setBounds({
       x: Math.max(0, Math.round(bounds.x)),
       y: Math.max(0, Math.round(bounds.y)),
@@ -117,28 +132,32 @@ export class PreviewController {
     })
   }
 
-  /** يضبط حجم إطار العرض (محاكاة جهاز). */
+  /** يضبط حجم إطار العرض (محاكاة جهاز) داخل حدود العنصر المُمرَّر من الواجهة. */
   setViewport(size: { width: number; height: number } | null): void {
     this.state.viewport = size
     const win = this.state.window
     const view = this.state.view
-    if (!view) return
+    if (!view || !win || win.isDestroyed()) return
+
+    const bounds = this.state.bounds ?? { x: 0, y: 0, ...contentSize(win) }
     if (size === null) {
-      if (win && !win.isDestroyed()) {
-        const { width, height } = contentSize(win)
-        view.setBounds({ x: 0, y: 0, width, height })
-      }
+      view.setBounds({
+        x: Math.round(bounds.x),
+        y: Math.round(bounds.y),
+        width: Math.max(50, Math.round(bounds.width)),
+        height: Math.max(50, Math.round(bounds.height)),
+      })
       return
     }
-    if (win && !win.isDestroyed()) {
-      const { width, height } = contentSize(win)
-      view.setBounds({
-        x: Math.max(0, Math.floor((width - size.width) / 2)),
-        y: 0,
-        width: size.width,
-        height: Math.min(size.height, height),
-      })
-    }
+    // نحصر الحجم داخل حدود العنصر حتى لا يخرج عن الإطار المرسوم
+    const width = Math.min(size.width, bounds.width)
+    const height = Math.min(size.height, bounds.height)
+    view.setBounds({
+      x: Math.round(bounds.x + Math.max(0, (bounds.width - width) / 2)),
+      y: Math.round(bounds.y),
+      width: Math.max(50, Math.round(width)),
+      height: Math.max(50, Math.round(height)),
+    })
   }
 
   async open(url: string): Promise<{ ok: boolean; url: string }> {
@@ -154,11 +173,13 @@ export class PreviewController {
     const view = this.state.view
     if (!view) {
       this.state.url = url
+      this.broadcastUrl(url)
       return { ok: true, url }
     }
     this.state.logs = []
     this.state.url = url
     await view.webContents.loadURL(url)
+    this.broadcastUrl(url)
     return { ok: true, url }
   }
 

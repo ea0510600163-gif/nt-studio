@@ -99,6 +99,8 @@ export interface StudioBridge {
     onEvent(cb: (event: AgentEvent) => void): () => void
   }
   preview: {
+    /** يُستدعى من الواجهة عند تغيّر عنوان المعاينة. */
+    onUrl(cb: (url: string | null) => void): () => void
     open(url: string): Promise<{ ok: boolean; url: string }>
     close(): Promise<boolean>
     status(): Promise<{ url: string | null; hasView: boolean }>
@@ -109,5 +111,16 @@ export interface StudioBridge {
     typeText(selector: string, text: string): Promise<{ ok: boolean; error?: string }>
     reload(): Promise<boolean>
     setViewport(size: { width: number; height: number } | null): Promise<boolean>
+    /** يربط WebContentsView بموضع مستطيل في النافذة (بوحدات CSS). */
+    attach(bounds: PreviewBounds): Promise<boolean>
+    resize(bounds: PreviewBounds): Promise<boolean>
+    openExternal(url: string): Promise<boolean>
   }
+}
+
+export interface PreviewBounds {
+  x: number
+  y: number
+  width: number
+  height: number
 }
