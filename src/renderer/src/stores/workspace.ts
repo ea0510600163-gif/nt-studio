@@ -1,86 +1,67 @@
 import { create } from 'zustand'
-import type { AgentEvent, AgentPhase, PlanStep, ProjectInfo } from '../../../shared/api'
+import type { ProjectInfo } from '../../../shared/api'
+import {
+  MAX_LINES,
+  initialRunState,
+  runReducer,
+  type ChatLine,
+  type ConsoleIssue,
+  type Notice,
+  type NoticeLevel,
+  type Question,
+  type RunAction,
+  type RunState,
+  type ToolActivity,
+  type Usage,
+  type ViewportName,
+} from './reducer'
 
 /**
  * حالة مساحة العمل.
  *
- * قرار: مصدر الحقيقة الوحيد هو أحداث العملية الرئيسية. لا نخزّن نسخًا
- * منفصلة من حالة الوكيل في الواجهة — نستقبلها ونشتقّ منها العرض. هذا يمنع
- * الاختلاف بين ما تراه الواجهة وما يفعله الوكيل فعلًا.
+ * قرار: مصدر الحقيقة الوحيد هو أحداث العملية الرئيسية. لا نخزّن نسخًا منفصلة
+ * من حالة الوكيل — نستقبلها ونشتقّ منها العرض. هذا يمنع الاختلاف بين ما تراه
+ * الواجهة وما يفعله الوكيل فعلًا.
+ *
+ * كل انتقالات الحالة نفسها في `reducer.ts` (نقية وقابلة للاختبار). هذا الملف
+ * غلاف zustand رقيق حولها، لا يتخذ أي قرار.
  */
 
-export interface ToolActivity {
-  callId: string
-  name: string
-  args: Record<string, unknown>
-  status: 'running' | 'done' | 'error'
-  summary: string
-  ms: number
-  at: number
+export type {
+  ChatLine,
+  ConsoleIssue,
+  Notice,
+  NoticeLevel,
+  Question,
+  RunAction,
+  RunState,
+  ToolActivity,
+  Usage,
+  ViewportName,
 }
 
-export interface ChatLine {
-  id: string
-  role: 'user' | 'agent'
-  text: string
-  at: number
-}
-
-export interface Notice {
-  level: 'info' | 'warn' | 'error'
-  message: string
-  at: number
-}
-
-export type ViewportName = 'full' | 'laptop' | 'tablet' | 'mobile'
-
-export interface WorkspaceState {
+export interface WorkspaceState extends RunState {
   projects: ProjectInfo[]
   projectPath: string | null
-  projectsLoading: boolean
-
-  lines: ChatLine[]
-  streamingText: string
-  tools: ToolActivity[]
-  plan: PlanStep[]
-  notices: Notice[]
-
-  running: boolean
-  phase: AgentPhase
-  phaseDetail: string
-  streaming: boolean
-  awaitingQuestion: string | null
-
-  previewUrl: string | null
-  screenshot: string | null
-  consoleIssues: Array<{ level: string; text: string; line?: number }>
   viewport: ViewportName
-
   providerId: string | null
   modelId: string | null
 
-  setProjects: (p: ProjectInfo[]) => void
+  setProjects: (projects: ProjectInfo[]) => void
   setProject: (path: string | null) => void
+  setActive: (providerId: string | null, modelId: string | null) => void
+
   pushUserLine: (text: string) => void
-  resetRun: () => void
-  applyEvent: (e: AgentEvent) => void
+  pushNotice: (level: NoticeLevel, message: string) => void
   setPreviewUrl: (url: string | null) => void
-  setScreenshot: (data: string | null) => void
   setConsoleIssues: (issues: Array<{ level: string; text: string; line?: number }>) => void
   setViewport: (v: ViewportName) => void
-  setActive: (providerId: string | null, modelId: string | null) => void
-  setAwaitingQuestion: (q: string | null) => void
-  pushNotice: (level: Notice['level'], message: string) => void
+
+  /** الطريق الوحيد الذي يعدّل حالة تشغيل — كل شيء يمرّ من هنا. */
+  dispatch: (action: RunAction) => void
 }
 
-let seq = 0
-const nextId = (): string => `l${Date.now().toString(36)}${(seq++).toString(36)}`
-
-const MAX_TOOLS = 120
-const MAX_NOTICES = 200
-const MAX_LINES = 300
-
-const PHASE_LABEL: Record<AgentPhase, string> = {
+const PHASE_LABEL: Record<string, string> = {
   idle: 'جاهز',
   thinking: 'يفكّر',
   tool: 'ينفّذ',
@@ -92,181 +73,57 @@ const PHASE_LABEL: Record<AgentPhase, string> = {
   error: 'خطأ',
 }
 
-export function phaseLabel(phase: AgentPhase): string {
+export function phaseLabel(phase: string): string {
   return PHASE_LABEL[phase] ?? phase
 }
 
+let consoleSeq = 0
+
 export const useWorkspace = create<WorkspaceState>((set, get) => ({
+  ...initialRunState(),
+
   projects: [],
   projectPath: null,
-  projectsLoading: true,
-
-  lines: [],
-  streamingText: '',
-  tools: [],
-  plan: [],
-  notices: [],
-
-  running: false,
-  phase: 'idle',
-  phaseDetail: '',
-  streaming: false,
-  awaitingQuestion: null,
-
-  previewUrl: null,
-  screenshot: null,
-  consoleIssues: [],
   viewport: 'full',
-
   providerId: null,
   modelId: null,
 
-  setProjects: (projects) => set({ projects, projectsLoading: false }),
+  setProjects: (projects) => set({ projects }),
 
-  setProject: (projectPath) =>
-    set({
-      projectPath,
-      previewUrl: null,
-      screenshot: null,
-      consoleIssues: [],
-      lines: [],
-      streamingText: '',
-      tools: [],
-      plan: [],
-      notices: [],
-      running: false,
-      phase: 'idle',
-      awaitingQuestion: null,
-    }),
+  setProject: (projectPath) => {
+    const keep = { projects: get().projects, providerId: get().providerId, modelId: get().modelId }
+    // مشروع جديد = جولة جديدة: نبدأ من حالة ابتدائية نظيفة.
+    set({ ...keep, ...initialRunState(), projectPath })
+  },
 
-  pushUserLine: (text) =>
-    set((s) => ({
-      lines: [...s.lines, { id: nextId(), role: 'user' as const, text, at: Date.now() }].slice(-MAX_LINES),
-    })),
+  setActive: (providerId, modelId) => set({ providerId, modelId }),
 
-  resetRun: () =>
-    set({
-      streamingText: '',
-      tools: [],
-      streaming: false,
-      awaitingQuestion: null,
-      notices: [],
-    }),
+  pushUserLine: (text) => {
+    const body = text.trim()
+    if (!body) return
+    set((s) => {
+      const line: ChatLine = { id: `u${s.lineSeq}`, role: 'user', text: body, at: Date.now() }
+      return { lines: [...s.lines, line].slice(-MAX_LINES), lineSeq: s.lineSeq + 1 }
+    })
+  },
 
-  pushNotice: (level, message) =>
-    set((s) => ({
-      notices: [...s.notices, { level, message, at: Date.now() }].slice(-MAX_NOTICES),
-    })),
+  pushNotice: (level, message) => get().dispatch({ type: 'log/note', level, message }),
 
   setPreviewUrl: (previewUrl) => set({ previewUrl }),
-  setScreenshot: (screenshot) => set({ screenshot }),
-  setConsoleIssues: (consoleIssues) => set({ consoleIssues }),
+
+  setConsoleIssues: (issues) =>
+    set({
+      consoleIssues: issues.map((i): ConsoleIssue => ({
+        id: `c${consoleSeq++}`,
+        level: i.level,
+        text: i.text,
+        line: i.line,
+      })),
+    }),
+
   setViewport: (viewport) => set({ viewport }),
-  setActive: (providerId, modelId) => set({ providerId, modelId }),
-  setAwaitingQuestion: (awaitingQuestion) => set({ awaitingQuestion, running: false, streaming: false }),
 
-  applyEvent: (e) => {
-    switch (e.type) {
-      case 'status': {
-        set({ phase: e.phase, phaseDetail: e.detail ?? '' })
-        return
-      }
-
-      case 'text': {
-        set((s) => ({ streamingText: s.streamingText + e.delta, streaming: true }))
-        return
-      }
-
-      case 'tool_start': {
-        set((s) => {
-          const activity: ToolActivity = {
-            callId: e.callId || `t${s.tools.length}`,
-            name: e.name,
-            args: e.args ?? {},
-            status: 'running',
-            summary: '',
-            ms: 0,
-            at: Date.now(),
-          }
-          return {
-            streaming: false,
-            tools: [...s.tools, activity].slice(-MAX_TOOLS),
-          }
-        })
-        return
-      }
-
-      case 'tool_end': {
-        set((s) => {
-          let index = s.tools.findIndex((t) => t.callId === e.callId && t.status === 'running')
-          if (index === -1) {
-            for (let i = s.tools.length - 1; i >= 0; i--) {
-              const tool = s.tools[i]
-              if (tool && tool.name === e.name && tool.status === 'running') {
-                index = i
-                break
-              }
-            }
-          }
-          if (index === -1) return {}
-          const copy = [...s.tools]
-          const target = copy[index]
-          if (!target) return {}
-          copy[index] = {
-            ...target,
-            status: e.ok ? 'done' : 'error',
-            summary: e.summary,
-            ms: e.ms,
-          }
-          return { tools: copy }
-        })
-        return
-      }
-
-      case 'notice': {
-        set((s) => ({
-          notices: [...s.notices, { level: e.level, message: e.message, at: Date.now() }].slice(-MAX_NOTICES),
-        }))
-        return
-      }
-
-      case 'plan': {
-        set({ plan: e.steps })
-        return
-      }
-
-      case 'done': {
-        const state = get()
-        const text = state.streamingText.trim()
-        const lines =
-          text.length > 0
-            ? [...state.lines, { id: nextId(), role: 'agent' as const, text, at: Date.now() }].slice(-MAX_LINES)
-            : state.lines
-        set({
-          running: false,
-          streaming: false,
-          streamingText: '',
-          phase: e.reason === 'needs-input' ? 'idle' : 'done',
-          lines,
-          awaitingQuestion: e.reason === 'needs-input' ? text || 'في انتظار ردّك' : null,
-        })
-        return
-      }
-
-      case 'failed': {
-        set((s) => ({
-          running: false,
-          streaming: false,
-          streamingText: '',
-          phase: 'error',
-          notices: [...s.notices, { level: 'error' as const, message: e.message, at: Date.now() }].slice(
-            -MAX_NOTICES,
-          ),
-        }))
-        return
-      }
-    }
-  },
+  dispatch: (action) => set((s) => runReducer(s, action)),
 }))
 
 export const VIEWPORT_SIZES: Record<ViewportName, { width: number; height: number } | null> = {

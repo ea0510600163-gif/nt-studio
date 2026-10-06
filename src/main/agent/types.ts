@@ -35,7 +35,12 @@ export type AgentEvent =
   | { type: 'tool_end'; callId: string; name: string; ok: boolean; summary: string; ms: number }
   | { type: 'notice'; level: 'info' | 'warn' | 'error'; message: string }
   | { type: 'plan'; steps: PlanStep[] }
-  | { type: 'done'; reason: FinishReason }
+  /**
+   * حدث طرفي — يُبثّ مرة واحدة بالضبط على كل مخرج من الحلقة.
+   * `summary` و`verified` حقول اختيارية أُضيفت ليحمل الحدثُ الخلاصةَ نفسها
+   * التي تُخزَّن في سجل الجلسة، دون أن تُكسر أي مستهلك للحدث.
+   */
+  | { type: 'done'; reason: FinishReason; summary?: string; verified?: boolean }
   | { type: 'failed'; message: string }
 
 export interface ToolResult {

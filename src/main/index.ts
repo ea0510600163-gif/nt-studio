@@ -56,9 +56,14 @@ function createMainWindow(ctx: AppContext, preview: PreviewController, runner: A
     openExternally(url)
   })
 
-  // المعاينة عملية عرض منفصلة: نخبرها بعنوان النافذة عند كل حركة
-  win.on('resize', () => syncBounds(win, preview))
-  win.on('move', () => syncBounds(win, preview))
+  // المعاينة عملية عرض منفصلة يرسمها النظام **فوق** الواجهة بالكامل.
+  // عند تغيير مقاس النافذة نكتفي بإعادة تطبيق آخر حدود أرسلتها الواجهة (مقصوصةً
+  // على إطار المحتوى الجديد) — لا نخمّن مستطيل النافذة كاملة أبدًا؛ فقد كان
+  // resize/move → syncBounds يغطّي التطبيق كله ويلتهم كل نقرة.
+  // أما تحريك النافذة على الشاشة فلا يمسّ إحداثيات المحتوى إطلاقًا، فلا فعل له.
+  win.on('resize', () => preview.onHostResize())
+  win.on('maximize', () => preview.onHostResize())
+  win.on('unmaximize', () => preview.onHostResize())
 
   // إيقاف كل شيء بلطف قبل الإغلاق
   win.on('close', () => {
@@ -94,12 +99,6 @@ function createMainWindow(ctx: AppContext, preview: PreviewController, runner: A
   else void win.loadFile(join(__dirname, '../renderer/index.html'))
 
   return win
-}
-
-function syncBounds(win: BrowserWindow, preview: PreviewController): void {
-  if (!preview.hasView()) return
-  const [w, h] = win.getContentSize()
-  preview.applyBounds({ x: 0, y: 0, width: w ?? 800, height: h ?? 600 })
 }
 
 app.whenReady().then(async () => {

@@ -1,10 +1,10 @@
-import type { ToolSet } from 'ai'
+import { jsonSchema, type ToolSet } from 'ai'
 import { fsTools } from './fs'
 import { projectTools } from './project'
 import { memoryTools } from './memory'
 import { controlTools } from './control'
 import { previewTools } from './preview'
-import type { ToolContext, ToolSpec } from '../types'
+import type { ToolSpec } from '../types'
 
 /** كل أدوات الوكيل في سجل واحد — الترتيب يعكس أولوية الاستخدام. */
 export function toolCatalog(): ToolSpec[] {
@@ -31,39 +31,28 @@ export function toolSummary(): string {
 
 /**
  * يحوّل سجل أدواتنا إلى ToolSet يفهمه AI SDK.
- * كل أداة تُغلَّف لتلتقط الأخطاء كأداة فاشلة لا كرمي استثناء يُسقط الحلقة.
+ *
+ * قراران مقصودان هنا، وكلاهما أصلح عطبًا حقيقيًا:
+ *
+ * 1) **بلا `execute`.** الحلقة اليدوية في `loop.ts` هي المانِفّذ الوحيد للأدوات.
+ *    لو أرفقنا `execute` هنا لأدّى الـ SDK الأداة بنفسه (loop.ts: الدالة تُمرَّر
+ *    إلى generateText)، ثم أعاد `loop.ts` تنفيذ النداء نفسه — أي أن كل أداة
+ *    كانت تعمل مرتين: `create_project` مرتين، `npm install` مرتين، وخادم تطوير
+ *    ثانٍ يُقتل الأول. أداة معرَّفة بلا `execute` يعيدها `generateText` في
+ *    `result.toolCalls` **دون تنفيذ** (مُتحقَّق منه على ai@7.0.128).
+ *
+ * 2) **`jsonSchema(...)` حول المخطط.** مخططاتنا JSON Schema خام. الـ SDK يقرأ
+ *    `inputSchema` على أنه *دالة* أو غلاف `Schema`، فالمخطط الخام كان يرمي
+ *    `TypeError: schema is not a function`. `jsonSchema()` هو الغلاف الرسمي.
+ *
+ * الأداة تُغلَّف لأخطاء الأداة نفسها (تنفيذها في loop.ts:runOne) لا هنا.
  */
-export function buildToolSet(tools: ToolSpec[], t: ToolContext): ToolSet {
+export function buildToolSet(tools: ToolSpec[]): ToolSet {
   const set: ToolSet = {}
   for (const spec of tools) {
     set[spec.name] = {
       description: spec.description,
-      inputSchema: spec.inputSchema as ToolSet[string]['inputSchema'],
-      execute: async (args: unknown) => {
-        const started = Date.now()
-        t.emit({
-          type: 'tool_start',
-          callId: '',
-          name: spec.name,
-          args: (args ?? {}) as Record<string, unknown>,
-        })
-        try {
-          const res = await spec.execute((args ?? {}) as Record<string, unknown>, t)
-          t.emit({
-            type: 'tool_end',
-            callId: '',
-            name: spec.name,
-            ok: res.ok,
-            summary: res.ui ?? res.text.slice(0, 100),
-            ms: Date.now() - started,
-          })
-          return res.text
-        } catch (e) {
-          const msg = (e as Error).message
-          t.emit({ type: 'tool_end', callId: '', name: spec.name, ok: false, summary: msg.slice(0, 140), ms: Date.now() - started })
-          throw new Error(msg)
-        }
-      },
+      inputSchema: jsonSchema(spec.inputSchema),
     }
   }
   return set

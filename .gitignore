@@ -18,6 +18,9 @@ logs/
 npm-debug.log*
 pnpm-debug.log*
 
+# مساحة عمل الوكلاء (سجل وبريفات)
+.superpowers/
+
 # نظام التشغيل والمحررات
 .DS_Store
 Thumbs.db

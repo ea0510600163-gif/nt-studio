@@ -57,7 +57,13 @@ export type AgentEvent =
   | { type: 'notice'; level: 'info' | 'warn' | 'error'; message: string }
   | { type: 'plan'; steps: PlanStep[] }
   | { type: 'usage'; inputTokens: number; outputTokens: number }
-  | { type: 'done'; reason: 'stop' | 'max-steps' | 'aborted' | 'error' | 'needs-input' }
+  /**
+   * حدث طرفي — يُبثّ مرة واحدة بالضبط على كل مخرج من الحلقة.
+   * `summary` و`verified` مطابقة لما في `AgentEvent` داخل `src/main/agent/types.ts`:
+   * كان العقد المشترك لا يعلنهما مع أن الحلقة تبثّهما فعلًا، فكان أي مستهلك
+   * للواجهة مجبرًا على cast، وأي حقل جديد يُنسى في العقد يختفي عن الأنواع بصمت.
+   */
+  | { type: 'done'; reason: 'stop' | 'max-steps' | 'aborted' | 'error' | 'needs-input'; summary?: string; verified?: boolean }
   | { type: 'failed'; message: string }
 
 export interface RunInput {
