@@ -145,8 +145,8 @@ export function extractError(raw: string, status?: number): string {
   }
   const trimmed = raw.trim()
   return status
-    ? `HTTP ${status}: ${trimmed.slice(0, 300) || 'no details'}`
-    : trimmed.slice(0, 300) || 'failed without a message'
+    ? `HTTP ${status}: ${trimmed.slice(0, 300) || 'بدون تفاصيل'}`
+    : trimmed.slice(0, 300) || 'فشل الطلب بدون رسالة'
 }
 
 /* -------------------------------------------------------------------------- */
@@ -183,7 +183,7 @@ export async function probeConnection(input: ProbeInput): Promise<TestResult> {
       ok: false,
       status: null,
       latencyMs: 0,
-      message: 'Add at least one model name before testing',
+      message: 'أضف اسم نموذج واحدًا على الأقل قبل الاختبار',
       modelsFound: 0,
     }
   }
@@ -217,7 +217,7 @@ export async function probeConnection(input: ProbeInput): Promise<TestResult> {
       ok: true,
       status: 200,
       latencyMs,
-      message: `Connected via ${PROTOCOL_LABELS[input.protocol].title} - model ${model}${text ? ` - replied: ${text}` : ''}`,
+      message: `اتصال ناجح عبر ${PROTOCOL_LABELS[input.protocol].title} — النموذج ${model}${text ? ` — ردّ: ${text}` : ''}`,
       modelsFound: input.models.length,
     }
   } catch (e) {

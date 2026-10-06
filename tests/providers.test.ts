@@ -286,8 +286,9 @@ describe('التعامل مع الأخطاء', () => {
       apiKey: '',
       models: [],
     })
+    // الرسالة بالعربية عمدًا — الواجهة كلها عربية
     expect(result.ok).toBe(false)
-    expect(result.message).toContain('model')
+    expect(result.message).toContain('نموذج')
   })
 
   it('يبلّغ عن فشل الاتصال برسالة واضحة', async () => {

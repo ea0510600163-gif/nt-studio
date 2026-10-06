@@ -33,7 +33,6 @@ export default function ProvidersScreen({ providers, onChanged, onClose }: Props
   }, [form.protocol])
 
   const meta = PROTOCOL_LABELS[form.protocol]
-  const canSubmit = form.name.trim().length > 0 && form.baseUrl.trim().length > 0 && form.models.length > 0
 
   const modelsSummary = useMemo(
     () => (form.models.length > 3 ? `${form.models.slice(0, 3).join('، ')} +${form.models.length - 3}` : form.models.join('، ')),
@@ -48,6 +47,30 @@ export default function ProvidersScreen({ providers, onChanged, onClose }: Props
     setForm((f) => (f.models.includes(value) ? f : { ...f, models: [...f.models, value] }))
     setModelDraft('')
   }
+
+  /**
+   * النماذج الفعّالة = المحفوظة + ما هو مكتوب حاليًا.
+   * السبب: المستخدم يكتب اسم النموذج ثم يضغط «اختبار الاتصال» مباشرة،
+   * فلا ينبغي إهمال ما كتبه لمجرد أنه لم يضغط Enter.
+   */
+  const effectiveModels = useMemo((): string[] => {
+    const pending = modelDraft.trim().replace(/,$/, '')
+    if (!pending || form.models.includes(pending)) return form.models
+    return [...form.models, pending]
+  }, [form.models, modelDraft])
+
+  /** يعتمد ما كُتب في الحقل قبل أي إجراء (اختبار/حفظ). */
+  const commitDraft = (): string[] => {
+    const pending = modelDraft.trim().replace(/,$/, '')
+    if (pending && !form.models.includes(pending)) {
+      addModel(pending)
+      return [...form.models, pending]
+    }
+    return form.models
+  }
+
+  const canSubmit =
+    form.name.trim().length > 0 && form.baseUrl.trim().length > 0 && effectiveModels.length > 0
 
   const refresh = async (): Promise<void> => {
     const list = await window.studio.providers.list()
@@ -90,15 +113,16 @@ export default function ProvidersScreen({ providers, onChanged, onClose }: Props
     setError(null)
     setNotice(null)
     try {
-      const res = await window.studio.providers.probe({
-        name: form.name.trim() || 'مزوّد',
-        protocol: form.protocol,
-        baseUrl: form.baseUrl.trim(),
-        apiKey: form.apiKey,
-        models: form.models,
-      })
-      if (res.ok) setNotice(`${res.message} · ${res.latencyMs}ms`)
-      else setError(`فشل الاتصال: ${res.message}`)
+      const models = commitDraft()
+    const res = await window.studio.providers.probe({
+      name: form.name.trim() || 'مزوّد',
+      protocol: form.protocol,
+      baseUrl: form.baseUrl.trim(),
+      apiKey: form.apiKey,
+      models,
+    })
+    if (res.ok) setNotice(`${res.message} · ${res.latencyMs}ms`)
+    else setError(`فشل الاتصال: ${res.message}`)
     } catch (e) {
       setError(String((e as Error)?.message ?? e))
     } finally {
@@ -107,15 +131,17 @@ export default function ProvidersScreen({ providers, onChanged, onClose }: Props
   }
 
   const doSave = async (): Promise<void> => {
-    if (!canSubmit) {
+    const models = commitDraft()
+    const payload: ProviderInput = { ...form, models }
+    if (!payload.name.trim() || !payload.baseUrl.trim() || models.length === 0) {
       setError('الاسم والرابط واسم نموذج واحد على الأقل مطلوبة')
       return
     }
     setBusy('save')
     setError(null)
     try {
-      if (editingId) await window.studio.providers.update({ ...form, id: editingId })
-      else await window.studio.providers.add(form)
+      if (editingId) await window.studio.providers.update({ ...payload, id: editingId })
+      else await window.studio.providers.add(payload)
       await refresh()
       setForm(emptyProviderInput())
       setEditingId(null)
@@ -251,13 +277,14 @@ export default function ProvidersScreen({ providers, onChanged, onClose }: Props
                   className={`${FIELD} font-mono text-[12px]`}
                   value={modelDraft}
                   onChange={(e) => setModelDraft(e.target.value)}
+                  onBlur={() => addModel(modelDraft)}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' || e.key === ',') {
                       e.preventDefault()
                       addModel(modelDraft)
                     }
                   }}
-                  placeholder="اكتب اسم نموذج واضغط Enter"
+                  placeholder="اكتب اسم النموذج ثم اضغط Enter (أو اضغط زر الاختبار مباشرة)"
                   dir="ltr"
                 />
                 <button
