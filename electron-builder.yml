@@ -1,0 +1,35 @@
+appId: com.nt.studio
+productName: NT Studio
+copyright: NT
+
+directories:
+  buildResources: build
+  output: release
+
+files:
+  - out/**/*
+  - package.json
+
+# حزم كل شيء داخل asar: لا ملفات مصدر على القرص بعد التثبيت.
+asar: true
+
+# القوالب المستهدفة — ويندوز أولاً لأن التطبيق مصمم له.
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowElevation: true
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: NT Studio
+  # لا نمسح إعدادات المستخدم والمفاتيح عند إزالة التطبيق.
+  deleteAppDataOnUninstall: false
+  artifactName: ${productName}-${version}-Setup.${ext}
+
+publish: null

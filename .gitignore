@@ -1,0 +1,28 @@
+# الاعتماديات والمخرجات
+node_modules/
+out/
+dist/
+release/
+coverage/
+.vite/
+*.tsbuildinfo
+
+# أسرار — لا تُرفع أبداً
+.env
+.env.*
+!.env.example
+
+# سجلات ومخازن محلية
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# نظام التشغيل والمحررات
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
