@@ -9,9 +9,8 @@
  * ثم نتحقق من: جلب النماذج + طلب الإكمال + استخراج النص.
  */
 
-import { createServer, type Server } from 'node:http'
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { z } from 'zod'
 import {
   buildModel,
   extractError,
@@ -33,7 +32,7 @@ interface Capture {
 
 const captures: Capture[] = []
 
-function readBody(req: IncomingMessageLike): Promise<string> {
+function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve) => {
     let data = ''
     req.on('data', (c: Buffer) => (data += c.toString()))
@@ -41,14 +40,7 @@ function readBody(req: IncomingMessageLike): Promise<string> {
   })
 }
 
-type IncomingMessageLike = Parameters<typeof createServer>[0] extends (
-  req: infer R,
-  res: infer _S,
-) => void
-  ? R
-  : never
-
-function json(res: ServerResponseLike, status: number, payload: unknown): void {
+function json(res: ServerResponse<IncomingMessage>, status: number, payload: unknown): void {
   const text = JSON.stringify(payload)
   res.writeHead(status, {
     'content-type': 'application/json',
@@ -57,8 +49,6 @@ function json(res: ServerResponseLike, status: number, payload: unknown): void {
   })
   res.end(text)
 }
-
-type ServerResponseLike = Parameters<Parameters<typeof createServer>[0]>[1]
 
 let server: Server
 let origin = ''
@@ -335,9 +325,9 @@ describe('buildModel', () => {
         'key',
         'm',
       )
-      // AI SDK v7 يعيد كائن LanguageModel بإصدار المواصفة v4
+      // AI SDK v7 يعيد كائن LanguageModel بمواصفة v4 (النوع العام قد يكون اسمًا نصيًا)
       expect(model).toBeTruthy()
-      expect(model.specificationVersion).toBe('v4')
+      expect(typeof model === 'object' ? (model as { specificationVersion?: string }).specificationVersion : undefined).toBe('v4')
     }
   })
 })
