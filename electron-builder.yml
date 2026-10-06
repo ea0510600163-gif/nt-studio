@@ -19,6 +19,7 @@ win:
     - target: nsis
       arch:
         - x64
+  icon: build/icon.png
 
 nsis:
   oneClick: false
@@ -31,5 +32,7 @@ nsis:
   # لا نمسح إعدادات المستخدم والمفاتيح عند إزالة التطبيق.
   deleteAppDataOnUninstall: false
   artifactName: ${productName}-${version}-Setup.${ext}
+
+afterPack: scripts/after-pack.mjs
 
 publish: null

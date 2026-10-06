@@ -39,18 +39,44 @@ const MIME: Record<string, string> = {
 
 const live = new Map<number, Server>()
 
-export async function serveStatic(root: string, port: number, ctx: AppContext): Promise<string> {
+/** سجلّ اختياري — يسهّل اختبار الخادم بلا سياق Electron كامل. */
+type StaticLogger = { info: (m: string, d?: unknown) => void; error: (m: string, d?: unknown) => void }
+let activeLogger: StaticLogger | null = null
+
+/** يضبط المسجّل المستخدم (null افتراضيًا، ويُمرَّر في الاختبارات). */
+export function setStaticLogger(logger: StaticLogger | null): void {
+  activeLogger = logger
+}
+
+export async function serveStatic(root: string, port: number, ctx?: AppContext): Promise<string> {
   await stopStatic(port)
+
+  const baseDir = path.resolve(root)
+  // مقارنة تعتمد على path.relative بدل startsWith (البادئة النصية تخدع عند تشابه الأسماء)
+  const isInside = (candidate: string): boolean => {
+    const rel = path.relative(baseDir, path.resolve(candidate))
+    return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
+  }
 
   const server = createServer((req, res) => {
     void (async () => {
       try {
         const url = new URL(req.url ?? '/', `http://127.0.0.1:${port}`)
-        let rel = decodeURIComponent(url.pathname)
+        let rel: string
+        try {
+          rel = decodeURIComponent(url.pathname)
+        } catch {
+          res.writeHead(400).end('bad path')
+          return
+        }
+        if (rel.includes('\0')) {
+          res.writeHead(400).end('bad path')
+          return
+        }
         if (rel.endsWith('/')) rel += 'index.html'
 
-        const target = path.join(root, rel)
-        if (!target.startsWith(path.resolve(root))) {
+        const target = path.resolve(baseDir, `.${path.sep}${rel}`)
+        if (!isInside(target)) {
           res.writeHead(403).end('forbidden')
           return
         }
@@ -66,7 +92,7 @@ export async function serveStatic(root: string, port: number, ctx: AppContext): 
         }
         if (!info) {
           // SPA fallback
-          const fallback = path.join(root, 'index.html')
+          const fallback = path.join(baseDir, 'index.html')
           const fb = await stat(fallback).catch(() => null)
           if (fb) {
             send(res, fallback)
@@ -77,7 +103,8 @@ export async function serveStatic(root: string, port: number, ctx: AppContext): 
         }
         send(res, target)
       } catch (e) {
-        ctx.root.child('static').error('static serve failed', e)
+        const log = ctx ? ctx.root.child('static') : activeLogger
+        log?.error('static serve failed', e)
         if (!res.headersSent) res.writeHead(500).end('error')
       }
     })()
@@ -89,7 +116,8 @@ export async function serveStatic(root: string, port: number, ctx: AppContext): 
   })
 
   live.set(port, server)
-  ctx.root.child('static').info(`static server on 127.0.0.1:${port} for ${root}`)
+  const log = ctx ? ctx.root.child('static') : activeLogger
+  log?.info(`static server on 127.0.0.1:${port} for ${root}`)
   return `${root} -> ${port}`
 }
 

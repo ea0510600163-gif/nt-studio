@@ -14,7 +14,8 @@
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
     "check:encoding": "node scripts/check-encoding.mjs",
-    "build": "npm run typecheck && npm run check:encoding && electron-vite build",
+    "build:icon": "node scripts/make-icon.mjs",
+    "build": "npm run build:icon && npm run typecheck && npm run check:encoding && electron-vite build",
     "test": "vitest run",
     "test:watch": "vitest",
     "verify": "npm run typecheck && npm run check:encoding && npm test && electron-vite build",
@@ -34,6 +35,7 @@
     "zustand": "^5.0.15"
   },
   "devDependencies": {
+    "@electron/fuses": "^2.1.3",
     "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^26.6.4",
     "@types/react": "^19.3.0",
