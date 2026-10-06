@@ -1,10 +1,29 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import type { AppInfo, ProjectInfo } from '../../shared/api'
 import type { ProviderPublic } from '../../shared/providers'
 import ProvidersScreen from './components/ProvidersScreen'
 import ProjectPicker from './components/ProjectPicker'
 import ChatPanel from './components/ChatPanel'
-import { useWorkspace } from './stores/workspace'
+import { phaseLabel, useWorkspace } from './stores/workspace'
+import {
+  Badge,
+  Button,
+  ConfirmDialog,
+  EmptyState,
+  IconButton,
+  IconAlertTriangle,
+  IconChevronLeft,
+  IconChevronRight,
+  IconFolder,
+  IconPlug,
+  IconRotate,
+  IconTerminal,
+  Spinner,
+  StatusDot,
+  Tooltip,
+  cx,
+  type Tone,
+} from './components/ui'
 import {
   ROUTE_LABEL,
   applyIntent,
@@ -32,23 +51,53 @@ import {
   type NavState,
   type ProvidersLoad,
   type Route,
+  type RouteName,
   type StorageLike,
 } from './nav/routes'
 
 /**
- * جذر التطبيق — المضيف الوحيد للتنقّل.
+ * جذر التطبيق — **الهيكل** (shell) والمضيف الوحيد للتنقّل.
  *
- * كل المنطق هنا دوال خالصة في `nav/routes.ts`: مكدّس مسارات حقيقي بدل
- * بت `Screen = 'providers' | 'workspace'` كان معزلًا عن `projectPath`،
- * فأنتج شاشة بلا مخرج ومستخدمًا عالقًا عند أول مشروع.
+ * ## لماذا شجرة واحدة
  *
- * ثلاث قواعد لا تُكسر:
+ * كان الجذر `return <شاشة/>` لكل مسار: أربعة أشجار منفصلة، فيُزال الشريط
+ * العلوي وتُعاد أولويّات التركيز ويُصفَّر التمرير عند كل انتقال، وتنطفئ معاينة
+ * الوكيل لأن `ChatPanel` يقيس مستطيلها في `requestAnimationFrame` مرة واحدة
+ * (`ChatPanel.tsx:300-343`) — وهو مستطيل صفر إن كان المُركَّب غير مرئي.
+ * الآن الهيكل شجرة واحدة: شريط علوي ثابت + شريط جانبي + خانة محتوى، والشاشة
+ * **مُحدَّدة بجدول** لا بـ`if` مبكّر، فلا يُعاد تركيب الهيكل ولا يُمحى عنه.
+ *
+ * الشاشات الثلاث تُبنى كأقران داخل `screens`، فتُقرأ الشجرة كلها في مكان واحد:
+ * أينما كان `ChatPanel` فلن يكون هناك شيء يرسم فوق مستطيل المعاينة.
+ *
+ * ## ثلاث قواعد لا تُكسر
  *  1. لا تنقّل من ردّ الـ API: `onChanged` يحدّث الحالة فقط. التنقّل فعل مستخدم.
  *  2. لا مؤشر تحميل أبدي: كل وعد يُترجم إلى مسار، والفشل إلى مسار خطأ فيه زر.
  *  3. `projectPath` داخل المسار — فالتناقض بين الشاشة والمشروع مستحيل.
  */
 
-const BTN = 'h-7 rounded-lg border border-line px-2.5 text-[11.5px] text-mute hover:bg-panel2 hover:text-main disabled:cursor-not-allowed disabled:opacity-40'
+/* ------------------------------------------------------- ثابتا الهيكل */
+
+/**
+ * ارتفاع الشريط العلوي = 36px.
+ * سلم المسافات يتوقف عند 32/28/34/40 فلا درجة تطابق 36، و`h-9` درجة قياسية
+ * في Tailwind (0.25rem×9) لا قيمة مخترعة ولا قيمة خارج السلم.
+ */
+const BAR_HEIGHT = 'h-9'
+
+/** عرض الشريط الجانبي — يستهلك الفراغ الميت بين حافة النافذة ومحتوى 768px. */
+const RAIL_WIDTH = 'w-14'
+
+/**
+ * شريط النافذة القابل للسحب.
+ *
+ * `-webkit-app-region` ليس صنفًا في Tailwind 4 ولا اسمًا في `@theme`، وقيمته
+ * (`drag` / `no-drag`) ليست لونًا ولا قياسًا — فكتابته في `style` هي الطريق
+ * الصادق، لا محاولة اختلاق صنف. جاهزة لتطبيق `titleBarStyle: 'hidden'` في
+ * `src/main/index.ts` (انظر تقرير هذه المرحلة).
+ */
+const DRAG = { WebkitAppRegion: 'drag' } as React.CSSProperties
+const NO_DRAG = { WebkitAppRegion: 'no-drag' } as React.CSSProperties
 
 function errText(e: unknown, fallback: string): string {
   const raw = (e as Error | undefined)?.message ?? String(e ?? '')
@@ -72,111 +121,272 @@ interface PendingExit {
   apply: () => void
 }
 
-/* ------------------------------------------------------------- شريط التنقّل */
+/* ------------------------------------------------------------ الشريط العلوي */
 
-interface ChromeProps {
+interface Crumb {
+  route: Route
+  label: string
+  /** هو هذا الموضع الحالي؟ */
+  current: boolean
+}
+
+interface TopBarProps {
+  ready: boolean
   nav: NavState
-  label: (route: Route) => string
+  crumbs: Crumb[]
+  providerText: string
+  statusLabel: string
+  statusTone: Tone
+  statusBusy: boolean
+  version: string
   onBack: () => void
   onForward: () => void
   onCrumb: (index: number) => void
-  onProviders: () => void
   onHome: () => void
-  pendingExit: PendingExit | null
-  onConfirmExit: () => void
-  onCancelExit: () => void
-  version: string
+  onProviders: () => void
 }
 
-function Chrome(props: ChromeProps): React.JSX.Element {
-  const { nav, label, pendingExit } = props
+/**
+ * شريط علوي واحد لكل التطبيق: من اليمين (البداية في RTL) زرّ الرجوع ثم اسم
+ * المنتج ثم فتات الخبز، ومن اليسار (النهاية) مؤشّر المزوّد وحالة الوكيل
+ * والأزرار والإصدار.
+ *
+ * **الرجوع يشير إلى اليمين**: في `dir="rtl"` الرجوع يمينًا، فالسهم `←` القديم
+ * كان يشير إلى التقدّم موقنًا بنفسه. `IconChevronRight` هو اتساع الرجوع ولا
+ * يُقلب (قاعدة نظام الأيقونات في `ui/icons.tsx`).
+ *
+ * كل عنصر تفاعلي يحمل `no-drag`، فلا يبتلع السحبَ ولا يفصل بين موضع الزر
+ * وموضع إشارته: ترتيب `Tab` هنا هو نفسه ترتيب القراءة (يمين ← يسار).
+ */
+function TopBar(props: TopBarProps): React.JSX.Element {
+  const { nav, crumbs, ready } = props
   const route = currentRoute(nav)
-  const crumbs = trail(nav)
 
   return (
-    <header className="flex h-11 shrink-0 items-center gap-3 border-b border-line bg-panel px-4">
-      <button
-        type="button"
-        onClick={props.onBack}
-        disabled={!canGoBack(nav)}
-        title="رجوع — Esc أو Alt + →"
-        aria-label="رجوع"
-        className={BTN}
-      >
-        →
-      </button>
-      <button
-        type="button"
-        onClick={props.onForward}
-        disabled={!canGoForward(nav)}
-        title="تقدّم — Alt + ←"
-        aria-label="تقدّم"
-        className={BTN}
-      >
-        ←
-      </button>
+    <header
+      aria-label="شريط التطبيق"
+      style={DRAG}
+      className={cx(
+        'flex shrink-0 select-none items-center gap-2 border-b border-line bg-surface-1 px-2',
+        BAR_HEIGHT,
+      )}
+    >
+      <Tooltip content="رجوع — Esc أو Alt + السهم الأيمن" side="bottom">
+        <IconButton
+          icon={<IconChevronRight size={15} />}
+          label="رجوع"
+          size="sm"
+          disabled={!ready || !canGoBack(nav)}
+          style={NO_DRAG}
+          onClick={props.onBack}
+        />
+      </Tooltip>
 
-      <div className="h-3 w-px bg-line" />
+      <Tooltip content="تقدّم — Alt + السهم الأيسر" side="bottom">
+        <IconButton
+          icon={<IconChevronLeft size={15} />}
+          label="تقدّم"
+          size="sm"
+          disabled={!ready || !canGoForward(nav)}
+          style={NO_DRAG}
+          onClick={props.onForward}
+        />
+      </Tooltip>
 
-      <nav aria-label="مسار التنقّل" className="flex min-w-0 items-center gap-1.5">
-        {crumbs.map((r, i) => (
-          <span key={`${i}-${r.name}`} className="flex min-w-0 items-center gap-1.5">
-            {i > 0 && <span className="text-[12px] text-faint">‹</span>}
-            <button
-              type="button"
-              onClick={() => props.onCrumb(i)}
-              disabled={i === nav.index}
-              title={label(r)}
-              className={`truncate text-[12.5px] ${
-                i === nav.index ? 'text-main' : 'text-mute hover:text-main'
-              }`}
-            >
-              {label(r)}
-            </button>
+      <span aria-hidden="true" className="h-4 w-px bg-line" />
+
+      <span className="font-mono text-sm font-medium text-text-primary" dir="ltr">
+        NT Studio
+      </span>
+
+      <nav aria-label="مسار التنقّل" style={NO_DRAG} className="flex min-w-0 items-center gap-1.5">
+        {crumbs.map((crumb, i) => (
+          <span key={`${i}-${crumb.route.name}`} className="flex min-w-0 items-center gap-1.5">
+            {/* الفاصل أيقونة لا `<div>` بعرض 1px على حدّ 1.29:1 — أي لا يُرى. */}
+            {i > 0 ? <IconChevronRight size={12} className="text-text-disabled" /> : null}
+            {crumb.current ? (
+              <span aria-current="page" className="truncate text-sm font-medium text-text-primary">
+                {crumb.label}
+              </span>
+            ) : (
+              <button
+                type="button"
+                onClick={() => props.onCrumb(i)}
+                className="focus-ring truncate rounded-sm px-1 text-sm text-text-secondary transition-ui hover:bg-surface-2 hover:text-text-primary"
+              >
+                {crumb.label}
+              </button>
+            )}
           </span>
         ))}
       </nav>
 
       <div className="flex-1" />
 
-      {pendingExit ? (
-        <>
-          <span className="text-[12px] text-warn">
-            الوكيل يعمل الآن — الرجوع إلى «{label(pendingExit.route)}» يمحو المحادثة
-          </span>
-          <button type="button" onClick={props.onCancelExit} className={BTN}>
-            Esc · تراجع
-          </button>
-          <button
-            type="button"
-            onClick={props.onConfirmExit}
-            className="h-7 rounded-lg border border-danger/40 px-2.5 text-[11.5px] text-danger hover:bg-danger/10"
-          >
-            خروج ومحو المحادثة
-          </button>
-        </>
-      ) : (
-        <>
-          <button
-            type="button"
-            onClick={props.onProviders}
-            disabled={route.name === 'providers'}
-            className={BTN}
-          >
-            المزوّدات
-          </button>
-          {route.name === 'workspace' && (
-            <button type="button" onClick={props.onHome} className={BTN}>
-              كل المشاريع
-            </button>
-          )}
-        </>
-      )}
+      <div style={NO_DRAG} className="flex min-w-0 items-center gap-2">
+        <Badge
+          tone="neutral"
+          size="sm"
+          icon={<IconPlug size={11} />}
+          className="min-w-0 shrink"
+          title={props.providerText}
+        >
+          {props.providerText}
+        </Badge>
 
-      <span className="font-mono text-[10.5px] text-faint" dir="ltr">
-        {props.version ? `v${props.version}` : ''}
-      </span>
+        <StatusDot tone={props.statusTone} label={props.statusLabel} pulse={props.statusBusy} />
+
+        <Button
+          size="sm"
+          variant="secondary"
+          style={NO_DRAG}
+          disabled={!ready || route.name === 'providers'}
+          onClick={props.onProviders}
+        >
+          المزوّدات
+        </Button>
+
+        {route.name === 'workspace' ? (
+          <Button size="sm" variant="secondary" style={NO_DRAG} onClick={props.onHome}>
+            كل المشاريع
+          </Button>
+        ) : null}
+
+        <span
+          className="font-mono text-xs text-text-muted"
+          dir="ltr"
+          aria-label={`الإصدار ${props.version || 'غير معروف'}`}
+        >
+          {props.version !== '' ? `v${props.version}` : '—'}
+        </span>
+      </div>
     </header>
+  )
+}
+
+/* ------------------------------------------------------------- الشريط الجانبي */
+
+interface RailProps {
+  route: Route
+  ready: boolean
+  refreshing: boolean
+  onRoute: (name: RouteName) => void
+  onRefreshProjects: () => void
+}
+
+/** الوجهات الثلاث — تُبنى مرة واحدة وتُشارَك كمرجع لا كمكوّنات منفصلة. */
+const RAIL_ITEMS: ReadonlyArray<{ name: RouteName; label: string; icon: ReactNode }> = [
+  { name: 'projects', label: 'المشاريع', icon: <IconFolder size={17} /> },
+  { name: 'workspace', label: 'مساحة العمل', icon: <IconTerminal size={17} /> },
+  { name: 'providers', label: 'المزوّدات', icon: <IconPlug size={17} /> },
+]
+
+/**
+ * شريط جانبي بدل الفراغ الميت.
+ *
+ * المؤشّر النشط حافة منطقية `border-s-2` لا `border-r-2`: في RTL البداية هي
+ * اليمين، فحافة البداية يجب أن تتبع الاتجاه لا أن تُكتب فيزيائيًا وتكسر عند قلب
+ * اللغة. `aria-current="page"` على الزر نفسه، والشرح يأتي من `Tooltip`
+ * لا من `title` (الاسم يبقى عربيًا في شجرة الوصول).
+ */
+function SideRail(props: RailProps): React.JSX.Element {
+  const current = props.route.name
+
+  return (
+    <nav
+      aria-label="التنقّل الرئيسي"
+      className={cx(
+        'flex shrink-0 flex-col items-center gap-1 border-e border-line bg-surface-1 py-2',
+        RAIL_WIDTH,
+      )}
+    >
+      {RAIL_ITEMS.map((item) => {
+        const active = current === item.name
+        return (
+          <span
+            key={item.name}
+            className={cx(
+              'flex w-full flex-col items-center border-s-2 transition-ui',
+              active ? 'border-accent bg-accent-bg' : 'border-transparent hover:bg-surface-2',
+              !props.ready && 'pointer-events-none opacity-45',
+            )}
+          >
+            <Tooltip content={item.label} side="start">
+              <IconButton
+                icon={item.icon}
+                label={item.label}
+                tone={active ? 'accent' : 'neutral'}
+                aria-current={active ? 'page' : undefined}
+                onClick={() => props.onRoute(item.name)}
+              />
+            </Tooltip>
+          </span>
+        )
+      })}
+
+      <span aria-hidden="true" className="my-1 h-px w-6 bg-line" />
+
+      <span className="mt-auto flex w-full flex-col items-center">
+        <Tooltip content="إعادة قراءة قائمة المشاريع من القرص" side="start">
+          <IconButton
+            icon={<IconRotate size={16} />}
+            label="تحديث قائمة المشاريع"
+            loading={props.refreshing}
+            onClick={props.onRefreshProjects}
+          />
+        </Tooltip>
+      </span>
+    </nav>
+  )
+}
+
+/* -------------------------------------------------------------- حالات المحتوى */
+
+function Booting(): React.JSX.Element {
+  return (
+    <div className="grid h-full place-items-center px-gutter py-gutter" aria-busy="true" aria-live="polite">
+      <span className="flex items-center gap-2 text-base text-text-secondary">
+        <Spinner size={16} label={null} />
+        <span>جارٍ إقلاع التطبيق…</span>
+      </span>
+    </div>
+  )
+}
+
+interface BootErrorProps {
+  message: string
+  onRetry: () => void
+  onProviders: () => void
+}
+
+/**
+ * خطأ الإقلاع داخل الهيكل لا فوقه: شريط التنقّل يبقى حيًّا، فالمستخدم يرى
+ * أين هو ولا تختفي الشاشة كاملة ثم تعود.
+ */
+function BootError(props: BootErrorProps): React.JSX.Element {
+  return (
+    <div className="grid h-full place-items-center px-gutter py-gutter">
+      <div className="w-full max-w-lg">
+        <EmptyState
+          icon={<IconAlertTriangle size={22} />}
+          title="تعذّر الإقلاع"
+          description="لم نتمكن من قراءة مزوّداتك المحفوظة. ملفاتك سليمة غالبًا — جرّب القراءة مجددًا."
+          action={
+            <Button variant="primary" onClick={props.onRetry}>
+              إعادة المحاولة
+            </Button>
+          }
+          secondaryAction={
+            <Button variant="secondary" onClick={props.onProviders}>
+              الذهاب لشاشة المزوّدات
+            </Button>
+          }
+        />
+        <p className="mt-3 text-center font-mono text-xs text-text-muted" dir="auto">
+          {props.message}
+        </p>
+      </div>
+    </div>
   )
 }
 
@@ -195,6 +405,9 @@ export default function App(): React.JSX.Element {
   const projects = useWorkspace((s) => s.projects)
   const storePath = useWorkspace((s) => s.projectPath)
   const running = useWorkspace((s) => s.running)
+  const phase = useWorkspace((s) => s.phase)
+  const providerId = useWorkspace((s) => s.providerId)
+  const modelId = useWorkspace((s) => s.modelId)
   const setProjects = useWorkspace((s) => s.setProjects)
   const setProject = useWorkspace((s) => s.setProject)
   const setActive = useWorkspace((s) => s.setActive)
@@ -379,6 +592,24 @@ export default function App(): React.JSX.Element {
     })
   }
 
+  /** الشريط الجانبي — وجهة واحدة تُترجم إلى فعل واحد، فلا منطق مكرّر. */
+  const goRoute = (name: RouteName): void => {
+    if (name === 'projects') {
+      goHome()
+      return
+    }
+    if (name === 'providers') {
+      goProviders()
+      return
+    }
+    const here = currentRoute(navRef.current)
+    const path = here.name === 'workspace' ? here.projectPath : storePath
+    guardExit({ name: 'workspace', projectPath: path }, () => {
+      writeResumePath(localStore(), path)
+      setNav((s) => goToWorkspace(s, path))
+    })
+  }
+
   const confirmExit = (): void => {
     const pending = pendingExit
     setPendingExit(null)
@@ -458,101 +689,122 @@ export default function App(): React.JSX.Element {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [])
 
-  /* ------------------------------------------------------------- العرض */
-
-  if (!ready) {
-    return <div className="grid h-full place-items-center bg-app text-[13px] text-faint">جارٍ التحميل…</div>
-  }
+  /* ------------------------------------------------------------- المشتقّات */
 
   const route = currentRoute(nav)
-  const chrome: ChromeProps = {
-    nav,
-    label: routeLabel,
-    onBack: goBack,
-    onForward: goForward,
-    onCrumb: goCrumb,
-    onProviders: goProviders,
-    onHome: goHome,
-    pendingExit,
-    onConfirmExit: confirmExit,
-    onCancelExit: () => setPendingExit(null),
-    version: info?.version ?? '',
-  }
+  const crumbs: Crumb[] = trail(nav).map((r, i) => ({
+    route: r,
+    label: routeLabel(r),
+    current: i === nav.index,
+  }))
 
-  if (route.name === 'error') {
-    return (
-      <div className="grid h-full place-items-center bg-app px-6">
-        <div className="card max-w-md px-6 py-6 text-center">
-          <h1 className="text-[15px] font-medium text-main">تعذّر الإقلاع</h1>
-          <p className="mt-2 text-[12.5px] leading-relaxed text-mute">
-            لم نتمكن من قراءة مزوّداتك المحفوظة. ملفاتك سليمة غالبًا — جرّب القراءة مجددًا.
-          </p>
-          <p className="mt-2 font-mono text-[11.5px] text-faint" dir="ltr">
-            {bootError ?? 'خطأ غير معروف'}
-          </p>
-          <div className="mt-5 flex flex-wrap justify-center gap-2">
-            <button
-              type="button"
-              onClick={() => void boot()}
-              className="h-9 rounded-lg bg-accent px-5 text-[12.5px] font-medium text-white hover:opacity-90"
-            >
-              إعادة المحاولة
-            </button>
-            <button
-              type="button"
-              onClick={() => setNav((s) => goToProviders(s))}
-              className="h-9 rounded-lg border border-line px-5 text-[12.5px] text-dim hover:bg-panel2 hover:text-main"
-            >
-              الذهاب لشاشة المزوّدات
-            </button>
-          </div>
-        </div>
-      </div>
-    )
-  }
+  const activeProvider = providers.find((p) => p.id === providerId) ?? null
+  const providerText = activeProvider
+    ? modelId
+      ? `${activeProvider.name} · ${modelId}`
+      : `${activeProvider.name} · بلا نموذج مختار`
+    : 'بلا مزوّد'
 
-  if (route.name === 'providers') {
-    return (
-      <div className="flex h-full flex-col bg-app">
-        <Chrome {...chrome} />
-        <div className="min-h-0 flex-1">
-          <ProvidersScreen
-            providers={providers}
-            onChanged={onProvidersChanged}
-            onClose={closeProviders}
-          />
-        </div>
-      </div>
-    )
-  }
+  const statusTone: Tone =
+    route.name === 'error'
+      ? 'danger'
+      : running
+        ? 'accent'
+        : phase === 'error'
+          ? 'danger'
+          : phase === 'done'
+            ? 'success'
+            : 'neutral'
 
-  if (route.name === 'projects') {
-    return (
-      <div className="flex h-full flex-col bg-app">
-        <Chrome {...chrome} />
-        <div className="min-h-0 flex-1">
-          <ProjectPicker
-            projects={projects}
-            version={info?.version ?? ''}
-            loading={projectsLoading}
-            error={projectsError}
-            root={projectsRootHint(projects)}
-            onRetry={() => void refreshProjects()}
-            onOpen={openProject}
-            onNewProject={startNewProject}
-            onProviders={goProviders}
-          />
-        </div>
-      </div>
-    )
+  /* ------------------------------------------------------------- خانة المحتوى */
+
+  /**
+   * الشاشات **أقران في جدول** لا `return <شاشة/>` مبكّر.
+   *
+   * العنصر الذي لا يُختار لا يُركَّب أصلًا (لا تُنفَّذ له `useEffect` ولا يُقاس
+   * مستطيله)، فيبقى حفظ المعاينة آمنًا؛ والفائدة الحقيقية أن الهيكل نفسه
+   * (الشريطان) لا يُزال تركيبه عند أي انتقال.
+   */
+  const screens: Record<RouteName, ReactNode> = {
+    providers: (
+      <ProvidersScreen
+        providers={providers}
+        onChanged={onProvidersChanged}
+        onClose={closeProviders}
+      />
+    ),
+    projects: (
+      <ProjectPicker
+        projects={projects}
+        loading={projectsLoading}
+        error={projectsError}
+        root={projectsRootHint(projects)}
+        onRetry={() => void refreshProjects()}
+        onOpen={openProject}
+        onNewProject={startNewProject}
+      />
+    ),
+    workspace: <ChatPanel />,
+    error: (
+      <BootError
+        message={bootError ?? 'خطأ غير معروف'}
+        onRetry={() => void boot()}
+        onProviders={() => setNav((s) => goToProviders(s))}
+      />
+    ),
   }
 
   return (
-    <div className="flex h-full flex-col bg-app">
-      <Chrome {...chrome} />
-      <div className="min-h-0 flex-1">
-        <ChatPanel />
+    <div className="flex h-full min-h-0 flex-col bg-bg">
+      <TopBar
+        ready={ready}
+        nav={nav}
+        crumbs={crumbs}
+        providerText={providerText}
+        statusLabel={phaseLabel(phase)}
+        statusTone={statusTone}
+        statusBusy={running}
+        version={info?.version ?? ''}
+        onBack={goBack}
+        onForward={goForward}
+        onCrumb={goCrumb}
+        onHome={goHome}
+        onProviders={goProviders}
+      />
+
+      <div className="flex min-h-0 flex-1">
+        <SideRail
+          route={route}
+          ready={ready}
+          refreshing={projectsLoading}
+          onRoute={goRoute}
+          onRefreshProjects={() => void refreshProjects()}
+        />
+
+        <main aria-label="محتوى الشاشة" className="min-h-0 min-w-0 flex-1 bg-bg">
+          {ready ? screens[route.name] : <Booting />}
+        </main>
       </div>
+
+      <ConfirmDialog
+        open={pendingExit !== null}
+        onCancel={() => setPendingExit(null)}
+        onConfirm={confirmExit}
+        title="الوكيل يعمل الآن"
+        confirmLabel="خروج ومحو المحادثة"
+        tone="danger"
+      >
+        <p className="text-base leading-relaxed text-text-secondary">
+          الانتقال إلى «{pendingExit ? routeLabel(pendingExit.route) : ''}» يمحو نصّ المحادثة من
+          الشاشة، وتتوقّف الواجهة عن استقبال أحداث المهمة. المهمة نفسها{' '}
+          <strong className="font-semibold text-text-primary">تستمرّ في العملية الرئيسية</strong> —
+          لن تتوقّف، لكن لن ترى آخر ما فعله الوكيل بعدها.
+        </p>
+        <p className="mt-2 text-sm leading-relaxed text-text-muted">
+          سجلّ الجلسات يبقى محفوظًا على القرص داخل مجلد <span className="font-mono">.agent</span> في
+          المشروع، لكنه لا يُستأنت تلقائيًا عند العودة.
+        </p>
+      </ConfirmDialog>
     </div>
   )
 }
