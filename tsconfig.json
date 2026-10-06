@@ -26,5 +26,5 @@
       "@shared/*": ["src/shared/*"]
     }
   },
-  "include": ["src/renderer/src", "src/shared"]
+  "include": ["src/renderer/src", "src/shared", "tests/ui.test.tsx"]
 }
