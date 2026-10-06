@@ -2,6 +2,7 @@ import { app, BrowserWindow, shell } from 'electron'
 import { join } from 'node:path'
 import { createContext, type AppContext } from './core/context'
 import { registerAppHandlers } from './ipc/app'
+import { registerProviderHandlers } from './ipc/providers'
 
 const APP_ID = 'com.nt.studio'
 const RENDERER_URL = process.env.ELECTRON_RENDERER_URL
@@ -74,6 +75,7 @@ app.whenReady().then(async () => {
   }
 
   registerAppHandlers(ctx)
+  registerProviderHandlers(ctx)
   mainWindow = createMainWindow()
 
   app.on('activate', () => {

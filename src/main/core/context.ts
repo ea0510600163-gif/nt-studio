@@ -3,6 +3,7 @@ import path from 'node:path'
 import { z } from 'zod'
 import { Logger, type ScopedLogger } from './logger'
 import { JsonStore } from './store'
+import { providerRecordSchema } from '../../shared/providers'
 
 /**
  * سياق التطبيق: نقطة واحدة تُنشئ كل حالة طويلة العمر وتمرّرها للوحدات.
@@ -16,8 +17,8 @@ export const appStateSchema = z.object({
   theme: z.enum(['dark', 'light']).default('dark'),
   logLevel: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   firstRunCompleted: z.boolean().default(false),
-  /** يملؤه S3 بمخطط المزوّدات الكامل. */
-  providers: z.array(z.unknown()).default([]),
+  /** سجلّ المزوّدات — المفاتيح مشفّرة بـ DPAPI. */
+  providers: z.array(providerRecordSchema).default([]),
   activeProviderId: z.string().nullable().default(null),
   activeModel: z.string().nullable().default(null),
 })
