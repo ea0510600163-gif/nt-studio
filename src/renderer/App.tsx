@@ -182,7 +182,7 @@ function AppContent() {
         <FirstRun onSaved={() => setFirstSaved(true)} />
       ) : (
         <main className="studio-main">
-          {railOpen && mode === 'studio' && <WorkspaceRail layout={layout} onLayout={setLayout} onCommands={() => setPalette(true)} onClose={() => setRailOpen(false)} />}
+          {railOpen && <WorkspaceRail layout={layout} onLayout={setLayout} onCommands={() => setPalette(true)} onClose={() => setRailOpen(false)} />}
           <div ref={workspace} className="workspace-panels" data-layout={layout}>
           <div style={{ width: chatW }} className="chat-column" hidden={layout === 'stage'}><Chat /></div>
           <div
