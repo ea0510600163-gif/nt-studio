@@ -252,6 +252,11 @@ export const useStore = create<State>((set, get) => ({
 
   async setMode(m) {
     if (get().mode === m) return
+    // التبديل أثناء عمل جارٍ يتركه يتيماً يستهلك الميزانية — أوقفه أولاً
+    if (get().running) {
+      get().notify('أوقف العمل الجاري أولاً ثم بدّل الوضع', 'warn')
+      return
+    }
     const from = get().mode
     const curId = get().sessionId
     // احفظ جلسة الوضع المغادَر في خانتها قبل المغادرة
@@ -281,6 +286,8 @@ export const useStore = create<State>((set, get) => ({
   async loadSession(id) {
     const l = await window.nt.sessions.load(id)
     get().applyLoaded(l)
+    // مزامنة الوضع مع الجلسة المحمّلة (درج الجلسات يعرض كل الأوضاع)
+    if ((l.session.mode ?? 'studio') !== get().mode) set({ mode: l.session.mode ?? 'studio' })
   },
 
   currentModel() {

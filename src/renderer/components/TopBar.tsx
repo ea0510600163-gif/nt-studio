@@ -207,10 +207,10 @@ export default function TopBar({ layout, onLayout, railOpen, onRail, mode, onMod
       </div>
       <span className="divider my-auto" data-dir="v" style={{ height: 'var(--sp-4)' }} />
 
-      {/* المشروع الحالي */}
-      <div className="project-context no-drag max-w-[240px]" title={project ? `المشروع الحالي: ${project.name}` : 'لا يوجد مشروع محدد'}>
-        <FolderKanban size={13} className="shrink-0" />
-        <span className="truncate">{project ? project.name : 'مشروع جديد'}</span>
+      {/* المشروع الحالي — أو هوية وضع الـ Agent */}
+      <div className="project-context no-drag max-w-[240px]" title={mode === 'agent' ? 'وضع Agent — مشغّل المتصفح' : project ? `المشروع الحالي: ${project.name}` : 'لا يوجد مشروع محدد'}>
+        {mode === 'agent' ? <Bot size={13} className="shrink-0" /> : <FolderKanban size={13} className="shrink-0" />}
+        <span className="truncate">{mode === 'agent' ? 'وكيل المتصفح' : project ? project.name : 'مشروع جديد'}</span>
       </div>
 
       <span className="flex-1" />
