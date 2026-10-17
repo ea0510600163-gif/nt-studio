@@ -1,4 +1,6 @@
 import type { ToolSchema } from '../providers/types'
+import type { SessionMode } from '@shared/types'
+import { selectModeTools } from './agentTools'
 import { browserTools } from './browser'
 import { fileTools } from './files'
 import { projectTools } from './project'
@@ -34,6 +36,15 @@ export const getTool = (name: string) => BY_NAME.get(name)
  */
 export function activeTools(_hasProject?: boolean): Tool[] {
   return ALL_TOOLS
+}
+
+/**
+ * أدوات الجلسة حسب وضعها: studio ترى كل شيء (كما اليوم حرفياً)، وagent
+ * ترى أدوات المتصفح فقط (AGENT_TOOL_NAMES). أي اسم في القائمة بلا أداة
+ * مسجلة يُتجاهل بصمت حتى لا تكسر إضافة لاحقة.
+ */
+export function toolsForMode(mode: SessionMode): Tool[] {
+  return selectModeTools(mode, ALL_TOOLS)
 }
 
 export const toSchemas = (tools: Tool[]): ToolSchema[] =>

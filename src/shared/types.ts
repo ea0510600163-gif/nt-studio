@@ -67,7 +67,12 @@ export interface SessionInfo {
   title: string
   updatedAt: number
   running: boolean
+  /** وضع الجلسة: studio (برمجة) أو agent (تشغيل متصفح) — غائب = studio للتوافق */
+  mode?: SessionMode
 }
+
+/** وضع الجلسة — يحدد الأدوات والموجّه والواجهة */
+export type SessionMode = 'studio' | 'agent'
 
 export type TodoStatus = 'pending' | 'doing' | 'done' | 'blocked'
 export interface TodoItem {
