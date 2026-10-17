@@ -47,7 +47,7 @@ export const uploadTools: Tool[] = [
       const n = need()
       if (n) return fail(n)
       const wc = preview.wc
-      if (!wc || wc.isDestroyed()) return fail('المعاينة غير مفتوحة.')
+      if (!wc) return fail('المعاينة غير مفتوحة. افتح صفحة عبر web_open أولاً ثم أعد المحاولة.')
 
       // 2) المحدد: نفس لغة browser_click (ref → data-nt-ref)؛ فرع text يعلّم الحقل بسمة
       let selector: string
@@ -85,7 +85,7 @@ export const uploadTools: Tool[] = [
         try {
           dbg.attach('1.3')
         } catch (e) {
-          return fail(`تعذّر ربط مصحح المتصفح (قد يكون مستخدماً): ${(e as Error).message}`)
+          return fail(`تعذّر ربط مصحح المتصفح — غالباً DevTools مفتوحة أو رفع آخر جارٍ: أغلق DevTools، وانتظر انتهاء أي رفع، ثم أعد المحاولة مرة واحدة. (${(e as Error).message})`)
         }
         try {
           const doc = (await dbg.sendCommand('DOM.getDocument', { depth: 0 })) as { root: { nodeId: number } }
@@ -96,7 +96,20 @@ export const uploadTools: Tool[] = [
           } catch {
             return fail(`لم يُعثر على حقل الرفع (${selector}). خذ browser_snapshot جديدة وتحقق من ref.`)
           }
-          if (!nodeId) return fail(`لم يُعثر على حقل الرفع (${selector}).`)
+          if (!nodeId) return fail(`لم يُعثر على حقل الرفع (${selector}). خذ browser_snapshot جديدة وتحقق من ref.`)
+          // تحقق النوع: الرقم القديم قد يشير لعنصر ليس حقل ملفات — ارفض قبل حقن غامض
+          try {
+            const desc = (await dbg.sendCommand('DOM.describeNode', { nodeId })) as {
+              node: { nodeName: string; attributes?: string[] }
+            }
+            const attrs = desc.node.attributes ?? []
+            const typeIdx = attrs.findIndex((a, k) => k % 2 === 0 && a.toLowerCase() === 'type')
+            const typeVal = typeIdx >= 0 ? (attrs[typeIdx + 1] ?? '').toLowerCase() : ''
+            if (desc.node.nodeName !== 'INPUT' || typeVal !== 'file')
+              return fail(`العنصر المحدد (${selector}) ليس حقل ملفات — بل <${desc.node.nodeName}>. خذ browser_snapshot جديدة وحدّد ref حقل الرفع الصحيح.`)
+          } catch {
+            return fail(`تعذّر فحص حقل الرفع (${selector}). خذ browser_snapshot جديدة وحدّد ref، أو استخدم selector لحقل input[type=file].`)
+          }
           await dbg.sendCommand('DOM.setFileInputFiles', { nodeId, files: [abs] })
         } finally {
           try {
@@ -106,10 +119,10 @@ export const uploadTools: Tool[] = [
           }
         }
       } catch (e) {
-        return fail(`فشل الرفع: ${(e as Error).message}`)
+        return fail(`فشل الرفع (${(e as Error).message}). تحقق أن الهدف input[type=file] فعلاً عبر browser_snapshot جديدة، وأن الملف موجود وغير مفتوح حصرياً، ثم أعد المحاولة.`)
       }
 
-      await preview.settle(ctx.signal)
+      await preview.settle(ctx.signal, 2500) // الرفع: انتظار توليد المعاينة/رد فعل الصفحة — لا شبكة كاملة
       const fresh = preview
         .getLogs()
         .console.filter((c) => c.level === 'error')

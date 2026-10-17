@@ -317,11 +317,12 @@ export class PreviewManager {
   /**
    * انتظار استقرار الصفحة بالشرط لا بزمن ثابت: ينتهي فور هدوء الشبكة والرسم،
    * أو بعد سقف زمني — بدل النوم الثابت الذي كان يُثقل كل إعادة تحميل بلا داع.
+   * maxMs سقف قابل للتخصيص حسب الفعل (ضغطة/تحجيم: ~1500؛ نقرة تنقّل: 4000).
    */
-  async settle(signal?: AbortSignal): Promise<void> {
+  async settle(signal?: AbortSignal, maxMs = SETTLE_MAX_MS): Promise<void> {
     const wc = this.wc
     if (!wc || wc.isDestroyed()) return
-    const end = Date.now() + SETTLE_MAX_MS
+    const end = Date.now() + Math.min(Math.max(maxMs, 500), SETTLE_MAX_MS)
     while (Date.now() < end) {
       if (signal?.aborted) return
       const quiet = Date.now() - this.lastActivity >= SETTLE_QUIET_MS

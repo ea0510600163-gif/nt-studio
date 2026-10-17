@@ -85,13 +85,13 @@ export const webTools: Tool[] = [
       try {
         const res = await fetch(String(i.url), { headers: { 'user-agent': UA, accept: 'text/html,application/json,text/plain,*/*' }, redirect: 'follow', signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(20000)]) })
         const ct = res.headers.get('content-type') ?? ''
-        if (!res.ok) return fail(`HTTP ${res.status} ${res.statusText}`)
+        if (!res.ok) return fail(`فشل الجلب: الخادم رد HTTP ${res.status} (${res.statusText}) للرابط ${i.url}. تحقق من الرابط، أو جرّب web_search للوصول لصفحة بديلة.`)
         if (/image|video|audio|zip|octet/.test(ct)) return fail(`نوع محتوى غير نصي: ${ct}`)
         const raw = await res.text()
         const text = /html/.test(ct) ? htmlToText(raw) : raw
         return ok(clip(text, Math.min(Number(i.max_chars) || 40000, 80000), 0.8))
       } catch (e) {
-        return fail(`تعذّر الجلب: ${(e as Error).message}`)
+        return fail(`تعذّر جلب ${i.url} (${(e as Error).message}). تحقق من الاتصال والإملاء ثم أعد المحاولة، أو استخدم web_search.`)
       }
     }
   },
@@ -112,10 +112,10 @@ export const webTools: Tool[] = [
         if (isAppPort(Number(u.port || 0)))
           return fail(`المنفذ ${u.port} هو منفذ NT Studio نفسه. للمشاريع المحلية استخدم preview_open، وللويب العام رابطاً خارجياً.`)
       } catch {
-        return fail(`وجهة غير صالحة بعد التطبيع: ${target}`)
+        return fail(`تعذّر فهم الوجهة "${i.target}". أعطِ رابط http(s) كاملاً أو عبارة بحث واضحة.`)
       }
       const r = await preview.load(target, 25000, ctx.signal)
-      if (!r.ok) return fail(`فشل الفتح: ${r.message}`)
+      if (!r.ok) return fail(`فشل فتح ${target} (${r.message}). تحقق من الإملاء والاتصال، أو جرّب web_open بكلمات بحث بدل الرابط، ثم أعد المحاولة.`)
       const logs = preview.getLogs()
       const errs = logs.console.filter((c) => c.level === 'error')
       return ok(`فُتح: ${preview.state.url} — «${preview.state.title || 'بلا عنوان'}»${errs.length ? `\n⚠ أخطاء Console (${errs.length}):\n${errs.slice(0, 5).map((e) => '  ' + e.text).join('\n')}` : '\n✓ لا أخطاء Console'}`)
@@ -130,19 +130,19 @@ export const webTools: Tool[] = [
       const wc = preview.wc
       if (!wc || wc.isDestroyed() || !preview.isOpen()) return fail('المعاينة غير مفتوحة. افتح صفحة عبر web_open أولاً.')
       const h = wc.navigationHistory
-      if (!h) return fail('سجل التنقل غير متاح في هذه النسخة من Electron.')
+      if (!h) return fail('سجل التنقل غير متاح هنا. افتح الرابط المقصود مباشرة عبر web_open بدل back/forward.')
       try {
         if (i.dir === 'back') {
-          if (!h.canGoBack()) return fail('لا صفحة سابقة في السجل.')
+          if (!h.canGoBack()) return fail('لا صفحة سابقة في السجل — أنت في أول الصفحات. افتح الوجهة المطلوبة عبر web_open.')
           h.goBack()
         } else if (i.dir === 'forward') {
-          if (!h.canGoForward()) return fail('لا صفحة تالية في السجل.')
+          if (!h.canGoForward()) return fail('لا صفحة تالية في السجل. افتح الوجهة المطلوبة عبر web_open.')
           h.goForward()
-        } else return fail('الاتجاه dir يجب أن يكون back أو forward.')
+        } else return fail(`الاتجاه dir يجب أن يكون back أو forward (استلمت ${JSON.stringify(i.dir)}).`)
       } catch (e) {
         return fail(`تعذّر التنقل: ${(e as Error).message}`)
       }
-      await preview.settle(ctx.signal)
+      await preview.settle(ctx.signal, 1500) // تنقل تاريخي: رجوع/تقدم سريع عادة (الكاش الخلفي)
       return ok(`الآن: ${preview.state.url} — «${preview.state.title || 'بلا عنوان'}»`)
     }
   }

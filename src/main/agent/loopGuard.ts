@@ -64,6 +64,15 @@ export const WRITE_TOOLS: ReadonlySet<string> = new Set([
   'run_command',
   'browser_upload', // طفرة خارجية: إرسال ملف محلي لموقع ويب
 ])
+/** أدوات فحص شفافة (قراءة بلا هدف): تُتخطى عند عدّ تكرار فعل المتصفح العالق */
+const PROBE_TOOLS: ReadonlySet<string> = new Set([
+  'browser_snapshot',
+  'browser_screenshot',
+  'browser_console',
+  'browser_audit'
+])
+/** تكرار الفعل على هدف المتصفح نفسه قبل الإنذار (تتخلله لقطات فقط) */
+const BROWSER_STUCK_REPEATS = 4
 /** الاستدعاء نفسه حرفياً يتكرر توالياً: عدد المرات اللازم للإنذار (5 — القراءة التدريجية والاستكشاف يحتاجان صبراً قبل اتهام الوكيل بالحلقة). */
 export const STREAK_LIMIT = 5
 /** تناوب A→B→A→B على الهدف نفسه: عدد الدورات (زوج A,B) اللازم للإنذار. */
@@ -77,18 +86,35 @@ export const ERROR_PREFIX_LEN = 80
 const ERR_KEY_SEP = ' | '
 
 /**
- * الهدف الملفّي للاستدعاء: أيّ معامل يُسمّي الملف (path، أو from/to للنقل) —
+ * الهدف المنطقي للاستدعاء: أيّ معامل يُسمّي الملف (path، أو from/to للنقل) —
  * مطبّع (شرطات، حالة الأحرف) حتى تُطابَق `src\a.ts` مع `src/a.ts`.
- * تُرجع null عندما لا يُسمّي الاستدعاء ملفاً (مسوحات بلا path، أوامر، أسئلة).
+ * ثم أهداف المتصفح (ref/selector/text/url/target/dir) ببادئة `browser:` مميزة،
+ * حتى تُكتشف حلقات `snapshot↔click` على العنصر نفسه.
+ * تُرجع null عندما لا يُسمّي الاستدعاء هدفاً (مسوحات بلا path، أوامر، أسئلة،
+ * ونقرات الإحداثيات x/y وحدها — فتكرارها سير شرعي في الألعاب والكانفس).
  */
 export function normalizeTarget(input: unknown): string | null {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return null
   const o = input as Record<string, unknown>
   const raw = o.path ?? o.from ?? o.to
-  if (typeof raw !== 'string') return null
-  const t = raw.trim().replace(/\\/g, '/').replace(/\/{2,}/g, '/').replace(/\/$/, '')
-  if (!t) return null
-  return t.toLowerCase()
+  if (typeof raw === 'string') {
+    const t = raw.trim().replace(/\\/g, '/').replace(/\/{2,}/g, '/').replace(/\/$/, '')
+    if (t) return t.toLowerCase()
+  }
+  if (o.ref != null && (typeof o.ref === 'number' || typeof o.ref === 'string')) {
+    const r = String(o.ref).trim()
+    if (r) return `browser:ref=${r.toLowerCase()}`
+  }
+  if (typeof o.selector === 'string' && o.selector.trim())
+    return `browser:sel=${o.selector.trim().toLowerCase().slice(0, 80)}`
+  if (typeof o.text === 'string' && o.text.trim())
+    return `browser:text=${o.text.trim().toLowerCase().replace(/\s+/g, ' ').slice(0, 60)}`
+  if (typeof o.url === 'string' && o.url.trim())
+    return `browser:url=${o.url.trim().toLowerCase().slice(0, 120)}`
+  if (typeof o.target === 'string' && o.target.trim())
+    return `browser:target=${o.target.trim().toLowerCase().replace(/\s+/g, ' ').slice(0, 80)}`
+  if (o.dir === 'back' || o.dir === 'forward') return `browser:nav=${o.dir}`
+  return null
 }
 
 /**
@@ -260,15 +286,46 @@ export class LoopGuard {
       )
     }
 
-    // 2) تناوب أداتين على الملف نفسه 3 دورات على الأقل (P1-2: واعٍ بالهدف)
+    // 2) تناوب أداتين على الهدف نفسه 3 دورات على الأقل (P1-2: واعٍ بالهدف)
     const alt = findAlternation(this.hist)
     if (alt) {
       this.reset()
+      if (alt.target.startsWith('browser:')) {
+        return this.penalize(
+          `تناوب ${alt.a}↔${alt.b} على العنصر نفسه (${alt.target}) ${alt.cycles} دورات دون تقدّم. ` +
+            `توقّف فوراً: خذ browser_snapshot جديدة وتحقق أن الأرقام ما زالت تشير للعناصر المقصودة (الأرقام القديمة قد تُعيد الترقيم لعناصر مختلفة)، ` +
+            `ثم غيّر الاستراتيجية: محدد CSS مختلف، أو مطابقة نصية، أو نهج آخر — ولا تعِد الدورة نفسها.`
+        )
+      }
       return this.penalize(
         `تناوب ${alt.a}↔${alt.b} على الملف نفسه (${alt.target}) ${alt.cycles} دورات دون تقدّم. ` +
           `توقّف عن حلقة القراءة-التعديل: اقرأ المقطع المطلوب مرة واحدة بتمعّن، ثم نفّذ تغييراً واحداً مدروساً، ` +
           `واستخدم grep للتحقق قبل التعديل بدل التناوب الأعمى.`
       )
+    }
+
+    // 2ب) الفعل نفسه على هدف المتصفح نفسه تتخلله لقطات فحص فقط (حلقة عالقة:
+    //     نقرة تفشل ← لقطة ← النقرة نفسها ← لقطة… — لا يكشفها التناوب ولا الـ streak)
+    const tailEntry = this.hist[this.hist.length - 1]
+    if (tailEntry?.target?.startsWith('browser:')) {
+      let reps = 0
+      for (let i = this.hist.length - 1; i >= 0; i--) {
+        const e = this.hist[i]
+        if (e.name === tailEntry.name && e.target === tailEntry.target) {
+          reps++
+          continue
+        }
+        if (e.target === null && PROBE_TOOLS.has(e.name)) continue
+        break
+      }
+      if (reps >= BROWSER_STUCK_REPEATS) {
+        this.reset()
+        return this.penalize(
+          `كرّرت ${tailEntry.name} على ${tailEntry.target} ${reps} مرات تتخللها لقطات فقط دون تقدّم. ` +
+            `توقّف فوراً: خذ browser_snapshot جديدة وتحقق أن الرقم ما زال يشير للعنصر المقصود، ` +
+            `ثم غيّر الاستراتيجية (محدد مختلف أو نهج آخر) — ولا تعِد الفعل نفسه.`
+        )
+      }
     }
 
     // 3) الأداة نفسها تخطئ بالنص نفسه 5 مرات على الأقل (OUTCOME_REPEAT: واعٍ بالنتيجة)
