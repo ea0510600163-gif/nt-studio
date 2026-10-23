@@ -170,7 +170,9 @@ src/main/
     project.ts memory.ts skills.ts subagent.ts worktree.ts agentTools.ts
   desktop/
     controller.ts    منطق التحكم بالكمبيوتر (إجراءات، UIA، لقطات، حالات)
-    win32Worker.ts   عامل PowerShell/C# حقيقي للإدخال وUIA
+    win32Worker.ts   عامل PowerShell/C# حقيقي للإدخال وUIA (نداءات UIA bounded بمهلة 6 ثوانٍ)
+    workerScript.ts  سكربت عامل PowerShell/C# كمصدر ثابت
+    appLaunch.ts     تشغيل التطبيقات: ذاكرة + بروتوكول + مسار + قائمة ابدأ
     geometry.ts      هندسة 1:1 والإحداثيات والتكبير
     visualDiff.ts    بصمة الشاشة وكشف الحلقة البصرية
     floatingHud.ts   الشريط العائم فوق سطح المكتب
