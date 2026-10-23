@@ -1,74 +1,92 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { AgentEvent, StudioBridge } from '../shared/api'
+import { EVENT_CHANNELS, type EventChannel, type NtApi } from '../shared/ipc'
 
-/**
- * هذا الملف هو الحدّ الأمني الوحيد بين Node والواجهة.
- * لا يُكشف ipcRenderer أبداً — فقط أفعال محددة بمدخلات مُتحقَّق منها في
- * العملية الرئيسية. لا قنوات عامة: لا يوجد invoke(channel) متاح للواجهة.
- */
+const inv = (ch: string, ...a: unknown[]) => ipcRenderer.invoke(ch, ...a)
 
-/** تمرير رد الإجراء إلى الواجهة مع اسم عربي مفهوم بدل "Error invoking remote method". */
-async function invoke<T>(channel: string, payload: unknown): Promise<T> {
-  try {
-    return (await ipcRenderer.invoke(channel, payload)) as T
-  } catch (e) {
-    const raw = (e as Error)?.message ?? String(e)
-    const cleaned = raw.replace(/^Error invoking remote method '[^']+':\s*/, '').replace(/^Error:\s*/, '')
-    throw new Error(cleaned)
-  }
-}
-
-/** اشتراك في قناة أحداث مع إعادة إلغاء اشتراك نظيفة. */
-function subscribe<T>(channel: string, cb: (payload: T) => void): () => void {
-  const handler = (_event: Electron.IpcRendererEvent, payload: T): void => cb(payload)
-  ipcRenderer.on(channel, handler)
-  return () => {
-    ipcRenderer.removeListener(channel, handler)
-  }
-}
-
-const bridge: StudioBridge = {
-  app: {
-    info: () => invoke('app:info', undefined),
-  },
-
+const api: NtApi = {
   providers: {
-    list: () => invoke('providers:list', undefined),
-    add: (input) => invoke('providers:add', input),
-    update: (input) => invoke('providers:update', input),
-    remove: (id) => invoke('providers:remove', { id }),
-    probe: (input) => invoke('providers:probe', input),
-    testSaved: (id) => invoke('providers:testSaved', { id }),
-    fetchModels: (input) => invoke('providers:fetchModels', input),
-    setActive: (id, model) => invoke('providers:setActive', { id, model }),
-    listProjects: () => invoke('projects:list', undefined),
+    list: () => inv('providers:list'),
+    save: (i) => inv('providers:save', i),
+    remove: (id) => inv('providers:remove', id),
+    test: (id, m) => inv('providers:test', id, m),
+    fetchModels: (i) => inv('providers:fetchModels', i)
   },
-
+  settings: {
+    get: () => inv('settings:get'),
+    set: (p) => inv('settings:set', p),
+    defaults: () => inv('settings:defaults')
+  },
+  skills: {
+    list: () => inv('skills:list'),
+    save: (i) => inv('skills:save', i),
+    remove: (id) => inv('skills:remove', id)
+  },
+  projects: {
+    list: () => inv('projects:list'),
+    open: (id, currentSessionId) => inv('projects:open', id, currentSessionId),
+    import: () => inv('projects:import'),
+    undo: (id) => inv('projects:undo', id),
+    reveal: (id) => inv('projects:reveal', id),
+    delete: (id) => inv('projects:delete', id),
+    deleteAll: () => inv('projects:deleteAll')
+  },
+  sessions: {
+    create: (mode) => inv('sessions:create', mode),
+    createForProject: (id) => inv('sessions:createForProject', id),
+    openLatest: (mode) => inv('sessions:openLatest', mode),
+    load: (id) => inv('sessions:load', id),
+    list: () => inv('sessions:list'),
+    deleteAll: () => inv('sessions:deleteAll')
+  },
   agent: {
-    run: (input) => invoke('agent:run', input),
-    stop: () => invoke('agent:stop', undefined),
-    status: () => invoke('agent:status', undefined),
-    history: (projectPath, limit) => invoke('agent:history', { projectPath, limit }),
-    onEvent: (cb: (event: AgentEvent) => void) => subscribe('agent:event', cb),
+    send: (id, t, m, imgs) => inv('agent:send', id, t, m, imgs),
+    regenerate: (id, m) => inv('agent:regenerate', id, m),
+    stop: (id) => inv('agent:stop', id),
+    resume: (id, m) => inv('agent:resume', id, m),
+    answer: (a, v) => inv('agent:answer', a, v),
+    emergencyStop: () => inv('agent:emergencyStop')
   },
-
+  permission: {
+    answer: (requestId, ok) => inv('permission:answer', requestId, ok)
+  },
   preview: {
-    onUrl: (cb: (url: string | null) => void) =>
-      subscribe<{ url: string | null }>('preview:url', (payload) => cb(payload.url)),
-    open: (url) => invoke('preview:open', { url }),
-    close: () => invoke('preview:close', undefined),
-    status: () => invoke('preview:status', undefined),
-    screenshot: () => invoke('preview:screenshot', undefined),
-    consoleErrors: () => invoke('preview:console', undefined),
-    evaluate: (expression) => invoke('preview:evaluate', { expression }),
-    click: (selector) => invoke('preview:click', { selector }),
-    typeText: (selector, text) => invoke('preview:type', { selector, text }),
-    reload: () => invoke('preview:reload', undefined),
-    setViewport: (size) => invoke('preview:setViewport', { size }),
-    attach: (bounds) => invoke('preview:attach', { bounds }),
-    resize: (bounds) => invoke('preview:resize', { bounds }),
-    openExternal: (url) => invoke('preview:openExternal', { url }),
+    setBounds: (b) => inv('preview:setBounds', b),
+    setSuppressed: (v) => inv('preview:setSuppressed', v),
+    setDevice: (d) => inv('preview:setDevice', d),
+    reload: () => inv('preview:reload'),
+    external: () => inv('preview:external'),
+    close: () => inv('preview:close'),
+    state: () => inv('preview:state')
   },
+  computer: {
+    state: () => inv('computer:state'),
+    control: (action, sessionId) => inv('computer:control', action, sessionId),
+    screenshot: () => inv('computer:screenshot')
+  },
+  window: {
+    minimize: () => inv('window:minimize'),
+    toggleMaximize: () => inv('window:toggleMaximize'),
+    close: () => inv('window:close'),
+    isMaximized: () => inv('window:isMaximized')
+  },
+  fs: {
+    tree: (id) => inv('fs:tree', id),
+    read: (id, p) => inv('fs:read', id, p),
+    pickFiles: () => inv('fs:pickFiles'),
+    pickFolder: () => inv('fs:pickFolder')
+  },
+  term: {
+    procs: () => inv('term:procs'),
+    replay: (id) => inv('term:replay', id),
+    input: (id, d) => inv('term:input', id, d),
+    stop: (id) => inv('term:stop', id)
+  },
+  on(channel: EventChannel, cb) {
+    if (!(EVENT_CHANNELS as readonly string[]).includes(channel)) throw new Error('قناة غير مسموحة')
+    const fn = (_e: unknown, payload: unknown) => cb(payload as never)
+    ipcRenderer.on(channel, fn)
+    return () => ipcRenderer.removeListener(channel, fn)
+  }
 }
 
-contextBridge.exposeInMainWorld('studio', bridge)
+contextBridge.exposeInMainWorld('nt', api)

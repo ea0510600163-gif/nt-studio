@@ -2,7 +2,7 @@ import { existsSync, statSync } from 'fs'
 import { join } from 'path'
 import { pathToFileURL } from 'url'
 import { send } from '../bus'
-import { findFreePort, isAppPort } from '../ports'
+import { isAppPort } from '../ports'
 import { preview, waitForPort } from '../preview'
 import { clip, resolvePath, sleep } from '../util'
 import { Tool, ToolContext, fail, ok, schema } from './types'
@@ -43,7 +43,6 @@ const AUDIT_JS = `(async () => {
   const empty = [...document.querySelectorAll('a')].filter((a) => !(a.innerText || a.getAttribute('aria-label') || '').trim() && !a.querySelector('img,svg')).length; if (empty) out.push('△ روابط بلا نص: ' + empty);
   const hrefs = [...new Set([...document.querySelectorAll('a[href]')].map((a) => a.href).filter((h) => h.startsWith(location.origin) && !h.includes('#')))].slice(0, 10);
   const dead = [];
-  // فحص خفيف: HEAD أولاً (يسقط لـ GET ببايت واحد عند الرفض)، تزامن 6، مهلة 4s للرابط
   const checkOne = async (h) => {
     try {
       let r = await fetch(h, { method: 'HEAD', signal: AbortSignal.timeout(4000) });
@@ -72,7 +71,6 @@ function resolverJs(spec: Record<string, unknown>): string {
     el = c.find((e) => get(e) === t) || c.filter((e) => get(e).includes(t)).sort((a, b) => get(a).length - get(b).length)[0] || null;
   }
   if (!el) return { ok: false, error: 'لم يُعثر على العنصر. خذ browser_snapshot جديدة.' };
-  // تحقق لحظة الحل: الرقم قد يُعاد ترقيمه لعنصر مختلف بعد تغيّر DOM — المخفي/المعدوم يُرفض
   const vr = el.getBoundingClientRect(); const vcs = getComputedStyle(el);
   if (!(vr.width > 0 && vr.height > 0 && vcs.visibility !== 'hidden' && vcs.display !== 'none'))
     return { ok: false, error: 'العنصر اختفى أو أصبح مخفياً بعد آخر لقطة. خذ browser_snapshot جديدة ولا تستخدم أرقاماً قديمة.' };
@@ -83,26 +81,15 @@ function resolverJs(spec: Record<string, unknown>): string {
 })()`
 }
 
-function need(ctx: ToolContext): string | null {
+function need(_ctx: ToolContext): string | null {
   if (!preview.isOpen()) return 'المعاينة غير مفتوحة. افتح صفحة أولاً عبر web_open (للويب العام) أو preview_open (لمنفذ/مسار محلي)، ثم أعد المحاولة.'
   send('ui:focus', 'preview')
   return null
 }
 
-/** frames instead of a fixed sleep: rAF x2 is the real "painted and idle" signal */
 const nextFrame = () => preview.exec('new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(()=>r(1))))').catch(() => null)
 
-/**
- * إغلاق ما فتحه الوكيل قبل أي التقاط — «الطريقة الذكية».
- *
- * المشكلة التي يعيشها المستخدمون: الوكيل يفتح قائمة ليفحصها، تبقى مفتوحة،
- * ثم تُلتقط لقطة الشاشة واللقطة النصية وهي تعجّ بالقوائم والحوارات — فيلخبط
- * الحكم على التصميم وتتلوّث مراجع العناصر. أنظمة الوكلاء العالمية تحلّها
- * بخطوة تنظيف قياسية قبل كل رصد للحالة: Escape (مرّتين: قائمة فرعية ثم
- * رئيسية) ثم إزالة التركيز. من يريد التقاط قائمة مفتوحة متعمّداً يمرّر keep_open.
- */
 async function dismissOverlays(): Promise<void> {
-  // فحص مشروط أولاً: صفحة بلا قوائم/حوارات/تركيز لا تدفع 6 رحلات ثابتة
   const busy = await preview
     .exec<boolean>(
       `!!(document.querySelector('dialog[open],[aria-expanded="true"],[role="dialog"],.modal.open,.dropdown.open,.menu.open')||(document.activeElement&&document.activeElement!==document.body))`
@@ -136,7 +123,7 @@ export const browserTools: Tool[] = [
   {
     name: 'preview_open',
     phase: 'acting',
-    description: 'Open the live preview pane for a local TCP port, URL, or local HTML file/folder path.',
+    description: 'Open the live preview pane on this machine for a local TCP port, URL, or local HTML file/folder path; the page is rendered in the studio pane and exists only while its local server runs.',
     schema: schema({
       port: { type: 'number', description: 'Local TCP port to wait for and load' },
       url: { type: 'string', description: 'HTTP/HTTPS URL or localhost:PORT' },
@@ -147,11 +134,9 @@ export const browserTools: Tool[] = [
       let url = ''
       let hint = ''
       if (i.port != null && i.port !== '') {
-        // منفذ واحد فقط يقبل: رقم صحيح داخل 1–65535 — لا انتظار 28 ساعة ولا NaN
         const port = Number(i.port)
         if (!Number.isInteger(port) || port < 1 || port > 65535)
           return fail(`منفذ غير صالح: ${JSON.stringify(i.port)}. أرسل رقماً صحيحاً بين 1 و65535.`)
-        // منفذ التطبيق نفسه ممنوع: فتحه يعرض واجهة NT Studio داخل المعاينة (صفحة فارغة)
         if (isAppPort(port))
           return fail(`المنفذ ${port} هو منفذ NT Studio نفسه (خادم الواجهة أثناء التطوير). استخدم free_port للحصول على منفذ آخر ثم شغّل خادمك عليه.`)
         const waitSec = Math.min(Math.max(Number(i.wait_sec) || 60, 5), 300)
@@ -160,9 +145,6 @@ export const browserTools: Tool[] = [
         url = `http://localhost:${port}`
       } else if (i.url) {
         const raw = String(i.url).trim()
-        // نتحقّق قبل التحليل: `new URL` كان يرمي «Invalid URL» الإنجليزي على
-        // صيغ شائعة (ليس آخرها localhost:3000) فيسقط ذلك في نصّ عربي فج.
-        // نقبل كذلك host:port بلا مخطّة ونكملها بـ http://.
         const withScheme = /^https?:\/\//i.test(raw) ? raw : /^[A-Za-z0-9.-]+:\d{1,5}(?:\/|$)/.test(raw) ? `http://${raw}` : ''
         if (!withScheme)
           return fail(`رابط غير صالح: ${raw}. الصيغ المقبولة: localhost:PORT أو http(s)://… أو مسار ملف مطلق.`)
@@ -228,13 +210,12 @@ export const browserTools: Tool[] = [
     name: 'browser_screenshot',
     parallel: true,
     phase: 'testing',
-    description: 'Capture a screenshot of the open live preview.',
+    description: 'Capture a screenshot of the open live preview. Open menus and dialogs are dismissed (Escape) before the capture unless keep_open=true.',
     schema: schema({ keep_open: { type: 'boolean', description: 'Keep open menus/overlays instead of dismissing them before capture' } }),
     async run(i, ctx) {
       const n = need(ctx)
       if (n) return fail(n)
       if (!i.keep_open) await dismissOverlays()
-      // بلا nextFrame زائد: dismissOverlays ينتهي أصلاً بإطار رسم
       try {
         const s = await preview.screenshot()
         return ok(`لقطة ${s.width}×${s.height} (${preview.state.device})${ctx.vision ? '' : ' — نموذجك لا يدعم الصور؛ استخدم browser_snapshot للفحص النصي.'}`, [{ mediaType: s.mediaType, data: s.data }])
@@ -247,7 +228,7 @@ export const browserTools: Tool[] = [
     name: 'browser_snapshot',
     parallel: true,
     phase: 'testing',
-    description: 'Read a structured text snapshot of the preview page: title, headings, visible text, and interactive elements numbered as [ref].',
+    description: 'Read a structured text snapshot of the preview page: title, headings, visible text, and interactive elements numbered as [ref]. Open menus and dialogs are dismissed (Escape) before the snapshot unless keep_open=true.',
     schema: schema({ keep_open: { type: 'boolean', description: 'Keep open menus/overlays instead of dismissing them' } }),
     async run(i, ctx) {
       const n = need(ctx)
@@ -322,10 +303,10 @@ export const browserTools: Tool[] = [
       if (!Number.isInteger(rep) || rep < 1 || rep > 50)
         return fail(`repeat يجب أن يكون عدداً صحيحاً بين 1 و50 (استلمت ${JSON.stringify(i.repeat)}).`)
       const before = errCount()
-      for (let k = 0; k < rep; k++) {
+      for (let idx = 0; idx < rep; idx++) {
         await preview.key(String(i.key), Number(i.hold_ms) || 0)
       }
-      await preview.settle(ctx.signal, 1500) // ضغطة: لا تنقّل متوقع — سقف قصير
+      await preview.settle(ctx.signal, 1500)
       return ok(`ضُغط ${i.key}${rep > 1 ? ` ×${rep}` : ''}${await errorsSince(before)}`)
     }
   },
@@ -337,7 +318,6 @@ export const browserTools: Tool[] = [
     async run(i, ctx) {
       const n = need(ctx)
       if (n) return fail(n)
-      // رحلة واحدة: التمرير وقراءة الموضع معاً (كانت 3 رحلات)
       const js = i.to === 'top' ? 'window.scrollTo(0,0)' : i.to === 'bottom' ? 'window.scrollTo(0,document.documentElement.scrollHeight)' : `window.scrollBy(0,${Number(i.dy) || 600})`
       const pos = await preview.exec<string>(js + ';Math.round(scrollY)+"/"+Math.max(0,document.documentElement.scrollHeight-innerHeight)')
       await nextFrame()
@@ -365,7 +345,6 @@ export const browserTools: Tool[] = [
       const t0 = Date.now()
       while (Date.now() < end) {
         if (await preview.exec<boolean>(js)) return ok('ظهر.')
-        // استطلاع متدرج: سريع أول ثانيتين ثم أهدأ — رحلات IPC أقل
         await sleep(Date.now() - t0 < 2000 ? 250 : 500, ctx.signal)
       }
       const what = i.selector ? `المحدد "${i.selector}"` : `النص "${i.text}"`
@@ -388,13 +367,13 @@ export const browserTools: Tool[] = [
     name: 'browser_resize',
     parallel: true,
     phase: 'testing',
-    description: 'Switch the preview viewport: mobile (390px), tablet (820px) or desktop (full width). Use when the user asks about responsiveness or while testing on explicit request.',
+    description: 'Switch the preview viewport: mobile (390px), tablet (820px) or desktop (full width).',
     schema: schema({ device: { type: 'string', enum: ['mobile', 'tablet', 'desktop'] } }, ['device']),
     async run(i, ctx) {
       const n = need(ctx)
       if (n) return fail(n)
       preview.setDevice(i.device)
-      await preview.settle(ctx.signal, 1500) // تحجيم: إعادة رسم محلية بلا شبكة غالباً
+      await preview.settle(ctx.signal, 1500)
       const sz = await preview.exec<string>('innerWidth+"×"+innerHeight')
       return ok(`الحجم الآن ${i.device} (${sz})`)
     }
@@ -431,7 +410,6 @@ export const browserTools: Tool[] = [
         const logs = preview.getLogs()
         const e = logs.console.filter((c) => c.level === 'error').length
         const summary = `${r}\n${e ? `✗ أخطاء Console: ${e}` : '✓ لا أخطاء Console'}${logs.network.length ? `\n✗ إخفاقات شبكة: ${logs.network.length}` : ''}`
-        // T4.3: Visual signal — if screenshot tool has vision, also suggest a screenshot for image diff
         return ok(summary)
       } catch (e) {
         return fail(`فشل الفحص (${(e as Error).message}). أعد تحميل الصفحة عبر preview_reload وحاول مجدداً، أو افحص browser_console للأخطاء الحية.`)

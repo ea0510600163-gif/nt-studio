@@ -1,554 +1,738 @@
-import { generateText, stepCountIs, type ModelMessage, type ToolSet } from 'ai'
-import type { AppContext } from '../core/context'
-import { decryptKeyOf } from '../core/providers'
-import type { ProviderRecord } from '../../shared/providers'
-import { buildModel } from '../core/providers'
-import {
-  ErrorTracker,
-  backoffMs,
-  classifyError,
-  estimateTokens,
-  sleep,
-  summarizeOldMessages,
-  type ChatMessage,
-  type ClassifiedError,
-} from './recovery'
-import { buildToolSet, toolCatalog } from './tools/index'
-import { SYSTEM_PROMPT } from './prompt'
-import type { AgentEvent, FinishReason, PlanStep, ToolContext, ToolSpec } from './types'
+import type { AgentEvent, ImageAttachment, ModelInfo, ModelRef, Phase, ProjectInfo, TodoItem } from '@shared/types'
+import { compactAtThreshold, FALLBACK_ATTEMPTS, IDLE_MS_PATIENT, LIMITS, PRIMARY_ATTEMPTS, SUMMARIZER_ATTEMPTS, idleMsForAttempt } from '../config'
+import { send } from '../bus'
+import { log, redact } from '../logger'
+import { callLlm } from '../providers/llm'
+import { withRetry } from '../providers/retry'
+import { Block, LlmError, LlmResult, Msg } from '../providers/types'
+import { ResolvedTarget, getSettings, listVisionModel, resolveModel } from '../store/providers'
+import { db } from '../store/db'
+import { getTool, toSchemas, toolsForMode } from '../tools/registry'
+import { gateTool } from '../tools/permission'
+import { toolValidationError } from '../tools/types'
+import type { Tool, ToolContext, ToolResult } from '../tools/types'
+import { abortError, abortable, clip, errMsg, isAbort, uid } from '../util'
+import { checkpoint, logToolCallTrimmed, touchProject } from '../workspace/projects'
+import { buildCompacted, dropStaleImages, estimateTokens, persistable, shrinkOld } from './context'
+import { LoopGuard, callSignature, normalizeTarget } from './loopGuard'
+import { actionsDigest, agentMemorySection, createAgentMemory, recordAction, recordAgentFile, setAgentGoal } from './agentMemory'
+import { longTermSection, recordTaskOutcome } from './agentNotes'
+import { pickModelRef } from './modelRef'
+import { buildSystemPrompt } from './prompt'
+import { Session } from './session'
+import { promoteReasoningAnswer } from './chatItems'
+import { opencodeSessionKey } from '../providers/opencode/headers'
+import { desktopController } from '../desktop/controller'
 
-/**
- * محرك الوكيل.
- *
- * الحلقة: استدعاء النموذج ← تنفيذ الأدوات ← تغذية النتيجة ← تكرار.
- * على عكس "while(true)" البسيط، هنا:
- *  - ميزانيات (خطوات/توكنات/وقت) قابلة للإيقاف
- *  - استرداد مصنّف لكل خطأ (لا تكرار أعمى)
- *  - كشف تعطّل بسلّم تصعيد
- *  - تصغير سياق تلقائي عند التجاوز
- *  - أدوات قراءة متوازية وأدوات كتابة متسلسلة
- *  - لا يمكن الإنهاء إلا بـ finish أو ask_user
- */
+const emit = (e: AgentEvent) => send('agent:event', e)
 
-export interface RunOptions {
-  providerId: string
-  modelId: string
-  prompt: string
-  projectRoot: string | null
-  sessionId: string
-  maxSteps?: number
-  maxTokens?: number
-  maxDurationMs?: number
-  signal: AbortSignal
-  emit: (event: AgentEvent) => void
+function memoryFor(s: Session): string | undefined {
+  if (s.mode !== 'agent') return undefined
+  return [s.memory ? agentMemorySection(s.memory) : '', longTermSection()].filter(Boolean).join('\n\n') || undefined
 }
 
-export interface RunResult {
-  reason: FinishReason
-  summary: string
-  verified: boolean
-  steps: number
-  inputTokens: number
-  outputTokens: number
-  durationMs: number
-  error?: string
+function describeUse(u: { name: string; input?: unknown }): string {
+  const i = (u.input ?? {}) as Record<string, unknown>
+  const c = Array.isArray(i.coordinate) ? ` (${Math.round(Number(i.coordinate[0]))},${Math.round(Number(i.coordinate[1]))})` : i.x != null && i.y != null ? ` (${Math.round(Number(i.x))},${Math.round(Number(i.y))})` : ''
+  const detail = i.text != null ? ` «${String(i.text).slice(0, 40)}»` : i.key != null ? ` ${String(i.key)}` : i.app != null ? ` ${String(i.app)}` : i.window_title != null ? ` ${String(i.window_title)}` : ''
+  return `${u.name}:${String(i.action ?? '')}${c}${detail}`
 }
 
-/** مُدخل `settle` — ما يحدّد الحدث الطرفي المُبثّ. */
-interface SettleInput {
-  reason: FinishReason
-  summary?: string
-  verified?: boolean
-  error?: string
+function lastAssistantText(s: Session): string {
+  for (let k = s.messages.length - 1; k >= 0; k--) {
+    const m = s.messages[k]
+    if (m.role !== 'assistant') continue
+    const t = m.content.map((b) => (b.type === 'text' ? b.text : '')).join(' ').replace(/\s+/g, ' ').trim()
+    if (t) return t
+  }
+  return ''
 }
 
-const DEFAULTS = {
-  maxSteps: 40,
-  maxTokens: 400_000,
-  maxDurationMs: 30 * 60_000,
+const SYNTHETIC_TOOL = '__invalid_call'
+
+function makeCtx(s: Session, signal: AbortSignal, vision: boolean, model: () => ModelInfo): ToolContext {
+  return {
+    sessionId: s.id,
+    signal,
+    vision,
+    project: () => s.project,
+    cwd: () => s.project?.dir ?? getSettings().workspaceRoot,
+    model,
+    settings: getSettings,
+    plan: () => s.plan,
+    bind(p: ProjectInfo) {
+      s.project = p
+      s.projectId = p.id
+      s.title = p.name
+      s.save()
+      emit({ t: 'project_bound', sessionId: s.id, project: p })
+    },
+    setPlan(items: TodoItem[]) {
+      s.plan = items
+      s.save()
+      emit({ t: 'plan', sessionId: s.id, items })
+    },
+    setPhase(phase: Phase, label?: string) {
+      emit({ t: 'status', sessionId: s.id, phase, label })
+    },
+    ask(question, options) {
+      return new Promise<string>((resolve) => {
+        const askId = uid('ask_')
+        const done = (v: string) => {
+          s.asks.delete(askId)
+          signal.removeEventListener('abort', onAbort)
+          resolve(v)
+        }
+        const onAbort = () => done('')
+        s.asks.set(askId, done)
+        signal.addEventListener('abort', onAbort, { once: true })
+        emit({ t: 'status', sessionId: s.id, phase: 'waiting', label: 'بانتظار إجابتك' })
+        emit({ t: 'ask', sessionId: s.id, askId, question, options })
+      })
+    }
+  }
 }
 
-/** نص النتيجة البديل للنداءات التي لم تُنفَّذ (إعادة تخطيط / إيقاف). */
-const SKIPPED_RESULT = 'لم تُنفَّذ هذه الأداة — أُعيدت صياغة الخطوة. اقرأ state المشروع ثم نفّذ نهجًا مختلفًا.'
+function validate(tool: Tool, input: any): string | null {
+  if (input && typeof input === 'object' && '__parse_error' in input) return `معطيات الأداة غير صالحة: ${input.__parse_error}`
+  return toolValidationError(tool, input)
+}
 
-export async function runAgent(ctx: AppContext, opts: RunOptions): Promise<RunResult> {
+function clipInput(v: unknown, max = 1200, depth = 0): unknown {
+  if (depth > 3) return '…'
+  if (typeof v === 'string') return v.length > max ? `${v.slice(0, max)}… [${v.length} حرفاً]` : v
+  if (Array.isArray(v)) return v.slice(0, 20).map((x) => clipInput(x, max, depth + 1))
+  if (v && typeof v === 'object') {
+    const o: Record<string, unknown> = {}
+    for (const [k, x] of Object.entries(v)) o[k] = clipInput(x, max, depth + 1)
+    return o
+  }
+  return v
+}
+
+const BROWSER_TOOLS = new Set(['computer', 'desktop_app', 'progress', 'browser_screenshot', 'browser_snapshot', 'browser_click', 'browser_type', 'browser_press', 'browser_scroll', 'browser_wait', 'browser_console', 'browser_resize', 'browser_eval', 'browser_audit', 'preview_open', 'preview_reload', 'visual_check', 'web_open', 'browser_nav', 'browser_upload'])
+const SHELL_TOOLS = new Set(['run_command', 'read_process_output', 'send_process_input', 'stop_process', 'list_processes', 'spawn_agent'])
+
+function waitedTimeoutMs(waitMs: number): number {
+  return Math.min(Math.max(waitMs, 5_000), 300_000) + 45_000
+}
+
+function toolTimeoutMs(name: string, input: Record<string, unknown>): number {
+  if (SHELL_TOOLS.has(name)) return 0
+  if (name === 'computer' || name === 'desktop_app') return 180_000
+  if (name === 'preview_open') return waitedTimeoutMs((Number(input.wait_sec) || 60) * 1000)
+  if (name === 'browser_wait') return waitedTimeoutMs(Number(input.ms) || Number(input.timeout_ms) || 8_000)
+  if (BROWSER_TOOLS.has(name)) return 60_000
+  if (name === 'web_search' || name === 'web_fetch') return 45_000
+  return 120_000
+}
+
+async function approvalGate(s: Session, name: string, input: unknown, ctx: ToolContext): Promise<string | null> {
+  return await gateTool({
+    permissionMode: getSettings().permissionMode,
+    sessionId: s.id,
+    toolName: name,
+    args: input,
+    cwd: ctx.cwd(),
+    signal: ctx.signal,
+    setPhase: (p) => ctx.setPhase(p, p === 'waiting' ? 'بانتظار موافقتك' : undefined)
+  })
+}
+
+async function runOne(s: Session, use: Extract<Block, { type: 'tool_use' }>, ctx: ToolContext): Promise<ToolResult> {
+  const tool = getTool(use.name)
+  const allowed = toolsForMode(s.mode)
   const started = Date.now()
-  const maxSteps = opts.maxSteps ?? DEFAULTS.maxSteps
-  const maxTokens = opts.maxTokens ?? DEFAULTS.maxTokens
-  const maxDurationMs = opts.maxDurationMs ?? DEFAULTS.maxDurationMs
-
-  const record = findProvider(ctx, opts.providerId)
-  if (!record) throw new Error('المزوّد غير موجود')
-  const apiKey = decryptKeyOf(ctx, record)
-  const model = buildModel(record, apiKey, opts.modelId)
-
-  /**
-   * مانع تكرار الحدث الطرفي.
-   *
-   * `loop.ts` هو المصدر الوحيد لأحداث `done`/`failed` — نُسقط أي حدث طرفي
-   * تحرّكه الأدوات نفسها (مثل `ask_user`) حتى لا تصل الواجهة حدثَّينِ نهاية،
-   * ونتأكّد أن كل مخرج من الحلقة يبثّ واحدًا فقط مهما كان عدد مخارجها.
-   */
-  let terminalSent = false
-  const emit = (event: AgentEvent): void => {
-    if (event.type === 'done' || event.type === 'failed') {
-      if (terminalSent) return
-      terminalSent = true
-    }
-    opts.emit(event)
-  }
-  const emitFromTool = (event: AgentEvent): void => {
-    if (event.type === 'done' || event.type === 'failed') return
-    opts.emit(event)
-  }
-
-  const toolContext: ToolContext = {
-    ctx,
-    projectRoot: opts.projectRoot,
-    sessionId: opts.sessionId,
-    signal: opts.signal,
-    emit: emitFromTool,
-  }
-
-  const tools: ToolSpec[] = toolCatalog()
-  const toolSet: ToolSet = buildToolSet(tools)
-  const tracker = new ErrorTracker()
-
-  // خريطة: مُعرِّف النداء ← اسم الأداة. `ChatMessage` في recovery.ts لا يحمل
-  // اسم الأداة، بينما جزء `tool-result` في ai@7 يشترط `toolName` — فنبنيه هنا.
-  const toolNames = new Map<string, string>()
-
-  // موجّه النظام أولًا، ثم **طلب المستخدم**. بدون الرسالة الثانية كانت
-  // messages.slice(1) فارغة في أول دورة فيرمي SDK:
-  // AI_InvalidPromptError: messages must not be empty — أي أن التطبيق لم يكن
-  // يستطيع تنفيذ أي مهمة إطلاقًا.
-  const messages: ChatMessage[] = [
-    { role: 'system', content: SYSTEM_PROMPT },
-    { role: 'user', content: opts.prompt },
-  ]
-
-  let inputTokens = 0
-  let outputTokens = 0
-  let steps = 0
-  let lastText = ''
-  let compacted = false
-  let replanInjected = false
-
-  const tokensUsed = (): number => inputTokens + outputTokens
-  const elapsed = (): number => Date.now() - started
-
-  for (let step = 0; step < maxSteps; step++) {
-    if (opts.signal.aborted) return settle({ reason: 'aborted' })
-
-    if (steps >= maxSteps) {
-      emit({
-        type: 'notice',
-        level: 'warn',
-        message: `وصلت للحد الأقصى للخطوات (${maxSteps}).`,
-      })
-      return settle({ reason: 'max-steps' })
-    }
-    if (tokensUsed() >= maxTokens) {
-      emit({
-        type: 'notice',
-        level: 'warn',
-        message: `وصلت لحد التوكنات (${Math.round(tokensUsed() / 1000)}k).`,
-      })
-      return settle({ reason: 'max-steps' })
-    }
-    if (elapsed() >= maxDurationMs) {
-      emit({ type: 'notice', level: 'warn', message: 'انتهى الوقت المخصص للمهمة.' })
-      return settle({ reason: 'max-steps' })
-    }
-
-    // تصغير السياق قبل الانتظار إذا تجاوز الحد
-    const estimated = estimateTokens(JSON.stringify(messages))
-    if (estimated > 120_000 && !compacted) {
-      const compactedMessages = summarizeOldMessages(messages, 8)
-      messages.length = 0
-      messages.push(...compactedMessages)
-      compacted = true
-      emit({ type: 'notice', level: 'info', message: 'تم ضغط السجل للحفاظ على السياق.' })
-    }
-
-    emit({ type: 'status', phase: 'thinking' })
-
-    let attempt = 0
-    let result: Awaited<ReturnType<typeof generateText>> | null = null
-
-    // إعادة المحاولة مع الاسترداد
-    while (attempt < 4) {
-      try {
-        result = await generateText({
-          model,
-          system: messages[0]?.content,
-          messages: toModelMessages(messages.slice(1), toolNames),
-          tools: toolSet,
-          // الأدوات بلا execute ⇒ التنفيذ الوحيد هو runOne أدناه
-          stopWhen: stepCountIs(1),
-          // ضغط السياق وإعادة التخطيط يحقنّان رسائل system وسط الحوار،
-          // و ai@7 يرفضها افتراضيًا بـ AI_InvalidPromptError.
-          allowSystemInMessages: true,
-          // إعادة المحاولة اليدوية المصنّفة أعلاه هي المسؤولة الوحيدة؛
-          // ترك maxRetries الافتراضي (2) يضاعف عدد الطلبات.
-          maxRetries: 0,
-          abortSignal: opts.signal,
-          onStepFinish: (s) => {
-            const usage = s.usage
-            if (usage) {
-              inputTokens += usage.inputTokens ?? 0
-              outputTokens += usage.outputTokens ?? 0
+  emit({ t: 'tool_start', sessionId: s.id, callId: use.id, name: use.name, input: clipInput(use.input) })
+  let res: ToolResult
+  try {
+    if (use.name === SYNTHETIC_TOOL) res = { content: `استدعاء أداة غير صالح: ${use.input?.__parse_error ?? ''}\nأعد الاستدعاء بصيغة JSON صحيحة.`, isError: true }
+    else if (!tool || !allowed.includes(tool)) res = { content: `الأداة "${use.name}" غير متاحة. المتاح: ${allowed.map((t) => t.name).join(', ')}`, isError: true }
+    else {
+      const bad = validate(tool, use.input)
+      if (bad) res = { content: bad, isError: true }
+      else {
+        const denied = await approvalGate(s, use.name, use.input ?? {}, ctx)
+        if (denied) res = { content: denied, isError: true }
+        else {
+          if (tool.phase) ctx.setPhase(tool.phase, undefined)
+          const callCtx: ToolContext = { ...ctx, callId: use.id }
+          const timeout = toolTimeoutMs(use.name, (use.input ?? {}) as Record<string, unknown>)
+          const run = (async (): Promise<ToolResult> => {
+            if (timeout > 0) {
+              let timerId: ReturnType<typeof setTimeout> | undefined
+              return await Promise.race([
+                tool.run(use.input ?? {}, callCtx).finally(() => { if (timerId) clearTimeout(timerId) }),
+                new Promise<never>((_, reject) => {
+                  timerId = setTimeout(() => reject(new Error(`انتهت مهلة الأداة (${timeout / 1000}ث). قلّل حجم الطلب أو قسّمه.`)), timeout)
+                })
+              ])
             }
-          },
-        })
-        break
-      } catch (e) {
-        const classified = classifyModelError(e)
-        emit({ type: 'notice', level: 'warn', message: `خطأ النموذج: ${classified.message.slice(0, 200)}` })
-
-        if (!classified.retryable || attempt >= 3) {
-          return settle({ reason: 'error', summary: '', verified: false, error: classified.message })
-        }
-
-        if (opts.signal.aborted) return settle({ reason: 'aborted' })
-
-        if (classified.cls === 'context') {
-          const compactedMessages = summarizeOldMessages(messages, 6)
-          messages.length = 0
-          messages.push(...compactedMessages)
-          compacted = true
-          emit({ type: 'notice', level: 'info', message: 'تجاوز السياق → ضغط السجل.' })
-          attempt++
-          continue
-        }
-
-        const wait = backoffMs(attempt)
-        emit({ type: 'notice', level: 'info', message: `إعادة محاولة ${attempt + 1}/3 بعد ${wait}ms…` })
-        await sleep(wait, opts.signal)
-        attempt++
-      }
-    }
-
-    if (!result) return settle({ reason: 'error', summary: '', verified: false, error: 'no response' })
-    steps++
-
-    const text = typeof result.text === 'string' ? result.text : ''
-    if (text.trim()) {
-      lastText = text
-      emit({ type: 'text', delta: text })
-    }
-
-    // تنفيذ الأدوات
-    const calls = result.toolCalls ?? []
-    if (calls.length === 0) {
-      return settle({ reason: 'stop', summary: text || lastText })
-    }
-
-    // رسالة المساعد تحمل نصّها ونداءاتها معًا. الصيغة القديمة
-    // (`content: string` + `toolCalls`) ليست ModelMessage صالحة في ai@7.
-    messages.push({
-      role: 'assistant',
-      content: text,
-      toolCalls: calls.map((c) => ({
-        id: c.toolCallId,
-        name: c.toolName,
-        args: JSON.stringify(c.input ?? {}),
-      })),
-    })
-    for (const c of calls) toolNames.set(c.toolCallId, c.toolName)
-
-    const readOnly = calls.filter((c) => {
-      const spec = tools.find((t) => t.name === c.toolName)
-      return spec?.parallelSafe === true
-    })
-    const serial = calls.filter((c) => {
-      const spec = tools.find((t) => t.name === c.toolName)
-      return spec?.parallelSafe !== true
-    })
-
-    // القراءة بالتوازي
-    if (readOnly.length > 0) {
-      const results = await Promise.all(
-        readOnly.map(async (call) => {
-          const start = Date.now()
-          emit({ type: 'tool_start', callId: call.toolCallId, name: call.toolName, args: call.input as Record<string, unknown> })
-          try {
-            const res = await runOne(tools, call.toolName, call.input as Record<string, unknown>, toolContext)
-            tracker.recordCall(call.toolName, call.input, res.ok)
-            emit({
-              type: 'tool_end',
-              callId: call.toolCallId,
-              name: call.toolName,
-              ok: res.ok,
-              summary: res.ui ?? res.text.slice(0, 120),
-              ms: Date.now() - start,
-            })
-            return { call, res, ms: Date.now() - start }
-          } catch (e) {
-            const msg = (e as Error).message
-            tracker.recordCall(call.toolName, call.input, false, msg)
-            emit({ type: 'tool_end', callId: call.toolCallId, name: call.toolName, ok: false, summary: msg.slice(0, 160), ms: Date.now() - start })
-            return { call, res: { ok: false, text: `ERROR: ${msg}` }, ms: Date.now() - start }
-          }
-        }),
-      )
-      for (const { call, res } of results) {
-        messages.push({ role: 'tool', toolCallId: call.toolCallId, content: res.text })
-        const terminal = terminalFromTool(call.toolName, res.text)
-        if (terminal) return settle(terminal)
-      }
-    }
-
-    // الكتابة/التنفيذ بالتسلسل
-    for (let i = 0; i < serial.length; i++) {
-      const call = serial[i]
-      if (!call) continue
-      if (opts.signal.aborted) return settle({ reason: 'aborted' })
-      const start = Date.now()
-      emit({ type: 'tool_start', callId: call.toolCallId, name: call.toolName, args: call.input as Record<string, unknown> })
-
-      if (tracker.isStuck() && tracker.strategy() !== 'retry') {
-        const strategy = tracker.strategy()
-        if (strategy === 'ask_user') {
-          return settle({ reason: 'needs-input', summary: tracker.stuckMessage() })
-        }
-        if (strategy === 'replan' && !replanInjected) {
-          replanInjected = true
-          // نُغلق كل النداءات المعلّقة بنتيجة بديلة: المزوّد يرفض رسالة
-          // فيها tool_call بلا tool-result مقابل. ونُرسل tool_end لكلٍّ منها
-          // حتى لا يبقى في الواجهة صفّ أدارة دائم.
-          for (const skipped of serial.slice(i)) {
-            emit({
-              type: 'tool_end',
-              callId: skipped.toolCallId,
-              name: skipped.toolName,
-              ok: false,
-              summary: 'أُعيدت التخطيط — لم تُنفَّذ',
-              ms: 0,
-            })
-            messages.push({ role: 'tool', toolCallId: skipped.toolCallId, content: SKIPPED_RESULT })
-          }
-          messages.push({
-            role: 'system',
-            content: `[REPLAN REQUIRED] ${tracker.stuckMessage()} اقرأ state المشروع من جديد، حدّث الخطة عبر update_plan، ثم نفّذ نهجًا مختلفًا كليًا.`,
-          })
-          emit({ type: 'notice', level: 'warn', message: 'إعادة تخطيط إجبارية — النهج السابق لم ينجح.' })
-          tracker.reset()
-          break
+            return await tool.run(use.input ?? {}, callCtx)
+          })()
+          res = await abortable(run, callCtx.signal)
         }
       }
-
-      let res: { ok: boolean; text: string; ui?: string }
-      try {
-        res = await runOne(tools, call.toolName, call.input as Record<string, unknown>, toolContext)
-        tracker.recordCall(call.toolName, call.input, res.ok)
-      } catch (e) {
-        const msg = (e as Error).message
-        res = { ok: false, text: `ERROR: ${msg}` }
-        tracker.recordCall(call.toolName, call.input, false, msg)
-      }
-
-      emit({
-        type: 'tool_end',
-        callId: call.toolCallId,
-        name: call.toolName,
-        ok: res.ok,
-        summary: res.ui ?? res.text.slice(0, 120),
-        ms: Date.now() - start,
-      })
-
-      messages.push({ role: 'tool', toolCallId: call.toolCallId, content: res.text })
-      const terminal = terminalFromTool(call.toolName, res.text)
-      if (terminal) return settle(terminal)
+    }
+  } catch (e) {
+    if (isAbort(e)) res = { content: 'أوقف المستخدم العملية.', isError: true }
+    else {
+      log.error(`فشل الأداة ${use.name}`, errMsg(e))
+      res = { content: `خطأ داخلي في الأداة: ${errMsg(e)}`, isError: true }
     }
   }
-
-  return settle({ reason: 'max-steps', summary: lastText })
-
-  /* ------------------------------------------------------------------ */
-
-  /**
-   * المخرج الوحيد من الحلقة.
-   *
-   * يبني `RunResult` **ويبثّ الحدث الطرفي نفسه**، فيضمن واحدًا بالضبط:
-   * `failed` عند `reason === 'error'`، و`done` في كل حالة أخرى. قبل هذا لم
-   * يكن أي فرع يُبثّ شيئًا، فبقيت الواجهة تدور على "يفكّر" إلى الأبد.
-   */
-  function settle(input: SettleInput): RunResult {
-    const summary = input.summary ?? lastText
-    const verified = input.verified === true
-    const result: RunResult = {
-      ...base(input.reason),
-      summary,
-      verified,
-      ...(input.error === undefined ? {} : { error: input.error }),
-    }
-    if (input.reason === 'error') {
-      emit({ type: 'status', phase: 'error' })
-      emit({ type: 'failed', message: input.error || summary || 'فشل التنفيذ' })
-    } else {
-      emit({ type: 'status', phase: 'done' })
-      emit({ type: 'done', reason: input.reason, summary, verified })
-    }
-    return result
-  }
-
-  function base(reason: FinishReason): Omit<RunResult, 'summary' | 'verified'> {
-    return {
-      reason,
-      steps,
-      inputTokens,
-      outputTokens,
-      durationMs: Date.now() - started,
-    }
-  }
+  res = { ...res, content: redact(clip(res.content, LIMITS.toolOutputChars)) }
+  const ms = Date.now() - started
+  emit({
+    t: 'tool_end',
+    sessionId: s.id,
+    callId: use.id,
+    ok: !res.isError,
+    output: clip(res.content, LIMITS.uiOutputChars, 0.5),
+    ms,
+    image: res.images?.[0] ? `data:${res.images[0].mediaType};base64,${res.images[0].data}` : undefined,
+    diff: res.diff
+  })
+  if (s.project) logToolCallTrimmed(s.project.dir, { tool: use.name, input: JSON.stringify(use.input).slice(0, 400), ok: !res.isError, ms })
+  return res
 }
 
-/* -------------------------------------------------------------------------- */
+const PARALLEL_FILE_MUTATIONS = new Set(['write_file', 'edit_file', 'make_dir'])
 
-/**
- * `ChatMessage` شكلٌ داخلي بسيط (نص + بيانات نداءات) لأن `recovery.ts` يقرأه
- * هكذا. `generateText` يطلب `ModelMessage[]` صارمة، وهذه هي الجسر:
- * رسالة `tool` يجب أن يكون محتواها **مصفوفة** أجزاء `tool-result` لا نصًّا،
- * وكل جزء يشترط `toolName` الذي لا يحمله `ChatMessage`.
- */
-function toModelMessages(transcript: ChatMessage[], toolNames: Map<string, string>): ModelMessage[] {
-  const out: ModelMessage[] = []
+async function execTools(s: Session, calls: Extract<Block, { type: 'tool_use' }>[], ctx: ToolContext): Promise<Map<string, ToolResult>> {
+  const out = new Map<string, ToolResult>()
+  const isReadPar = (c: (typeof calls)[number]) => !!getTool(c.name)?.parallel
+  const isFileMut = (c: (typeof calls)[number]) => PARALLEL_FILE_MUTATIONS.has(c.name)
 
-  for (const m of transcript) {
-    if (m.role === 'system') {
-      out.push({ role: 'system', content: m.content })
-      continue
-    }
-    if (m.role === 'user') {
-      out.push({ role: 'user', content: m.content })
-      continue
-    }
-    if (m.role === 'assistant') {
-      const parts: Array<
-        | { type: 'text'; text: string }
-        | { type: 'tool-call'; toolCallId: string; toolName: string; input: unknown }
-      > = []
-      if (m.content.trim()) parts.push({ type: 'text', text: m.content })
-      for (const tc of m.toolCalls ?? []) {
-        parts.push({
-          type: 'tool-call',
-          toolCallId: tc.id,
-          toolName: tc.name,
-          input: parseArgs(tc.args),
-        })
+  let i = 0
+  while (i < calls.length) {
+    if (ctx.signal.aborted) break
+    if (isReadPar(calls[i])) {
+      let j = i
+      while (j < calls.length && isReadPar(calls[j])) j++
+      await Promise.all(calls.slice(i, j).map(async (c) => out.set(c.id, await runOne(s, c, ctx))))
+      i = j
+    } else if (isFileMut(calls[i])) {
+      const seenTargets = new Set<string>()
+      let j = i
+      while (j < calls.length && isFileMut(calls[j])) {
+        const target = normalizeTarget(calls[j].input)
+        if (!target || seenTargets.has(target)) break
+        seenTargets.add(target)
+        j++
       }
-      if (parts.length > 0) out.push({ role: 'assistant', content: parts })
-      continue
+      if (j > i + 1) {
+        await Promise.all(calls.slice(i, j).map(async (c) => out.set(c.id, await runOne(s, c, ctx))))
+        i = j
+      } else {
+        out.set(calls[i].id, await runOne(s, calls[i], ctx))
+        i++
+      }
+    } else {
+      out.set(calls[i].id, await runOne(s, calls[i], ctx))
+      i++
     }
-    if (!m.toolCallId) continue
-    out.push({
-      role: 'tool',
-      content: [
-        {
-          type: 'tool-result',
-          toolCallId: m.toolCallId,
-          toolName: toolNames.get(m.toolCallId) ?? 'unknown',
-          output: { type: 'text', value: m.content },
-        },
-      ],
-    })
   }
-
   return out
 }
 
-function parseArgs(args: string): unknown {
-  try {
-    return JSON.parse(args) as unknown
-  } catch {
-    return {}
-  }
+interface Active {
+  primary: ResolvedTarget
+  fallback: ResolvedTarget | null
+  current: ResolvedTarget
+  sessionId: string
 }
 
-async function runOne(
-  tools: ToolSpec[],
-  name: string,
-  args: Record<string, unknown>,
-  toolContext: ToolContext,
-): Promise<{ ok: boolean; text: string; ui?: string }> {
-  const spec = tools.find((t) => t.name === name)
-  if (!spec) return { ok: false, text: `Unknown tool: ${name}` }
-  try {
-    const res = await spec.execute(args, toolContext)
-    return { ok: res.ok, text: res.text, ui: res.ui }
-  } catch (e) {
-    const msg = (e as Error).message
-    const classified = classifyError(e, statusOf(e))
-    return {
-      ok: false,
-      text: `ERROR (${classified.cls}): ${msg}\nHint: ${classified.hint ?? 'صحّح المُدخلات أو جرّب نهجًا مختلفًا.'}`,
-    }
-  }
+function sameTarget(a: ResolvedTarget, b: ResolvedTarget): boolean {
+  return a.provider.id === b.provider.id && a.model.id === b.model.id
 }
 
-/** استخراج رمز HTTP من أخطاء الـ SDK حتى تُصنَّف 401/403/429/5xx بدقّة. */
-function statusOf(e: unknown): number | null {
-  const err = e as { statusCode?: unknown; response?: { status?: unknown } } | null
-  if (typeof err?.statusCode === 'number') return err.statusCode
-  if (typeof err?.response?.status === 'number') return err.response.status
-  return null
-}
-
-/**
- * تصنيف خطأ النموذج للقرار فقط.
- *
- * `classifyError` يمرَّر بلا رمز HTTP فيتمنّع عن تمييز 401 من 5xx، والأخطر أن
- * `AI_InvalidPromptError` (خطأ مُدخلات لا يُصلَحه التكرار إطلاقًا) يقع في
- * الافتراضي `transient` ⇒ أربع محاولات و~7 ثوانٍ backoff قبل الفشل.
- * لذلك نمرّر الرمز، ونقصر إعادة المحاولة على أخطاء الاتصال/الخدمة وحدها.
- */
-function classifyModelError(e: unknown): ClassifiedError {
-  const base = classifyError(e, statusOf(e))
-  if (!isRetryableSdkError(e)) {
-    return { ...base, cls: base.cls === 'context' ? 'context' : 'logic', retryable: false }
-  }
-  return base
-}
-
-/** أخطاء الـ SDK التي تستحق إعادة المحاولة: نداء شبكة أو خدمة فقط. */
-function isRetryableSdkError(e: unknown): boolean {
-  const name = (e as { name?: string } | null)?.name ?? ''
-  if (name === 'AI_APICallError') return true
-  // أي خطأ SDK آخر (رسالة غير صالحة، أداة غير موجودة، مُدخل أداة غير صالح)
-  // خطأ في صيغة الطلب لا في الخدمة — إعادة المحاولة تعيد الطلب نفسه حرفيًا.
-  return !name.startsWith('AI_')
-}
-
-/** الأدوات التي تُنهي التكرار (finish / ask_user) ⇒ تُترجم إلى حدث طرفي. */
-function terminalFromTool(name: string, text: string): SettleInput | null {
-  if (name === 'finish') {
-    try {
-      const parsed = JSON.parse(text) as { summary?: string; verified?: boolean; caveats?: string }
-      const caveat = parsed.caveats ? `\n\nملاحظات: ${parsed.caveats}` : ''
-      return {
-        reason: 'stop',
-        summary: `${parsed.summary ?? ''}${caveat}`,
-        verified: parsed.verified === true,
+async function llmTurn(s: Session, a: Active, system: string, tools: Tool[], signal: AbortSignal) {
+  emit({ t: 'text_reset', sessionId: s.id })
+  emit({ t: 'thinking_reset', sessionId: s.id })
+  const modelCap = a.current.model.maxOutput ?? 64_000
+  const maxTokens = Math.max(1024, Math.min(getSettings().maxOutputTokens, modelCap, Math.floor(a.current.model.contextWindow * 0.5)))
+  const attemptWith = (t: ResolvedTarget, maxAttempts?: number) => {
+    return withRetry(
+      async (attempt) => {
+        const idleMs = idleMsForAttempt(attempt)
+        if (attempt > 1) {
+          emit({ t: 'text_reset', sessionId: s.id })
+          emit({ t: 'thinking_reset', sessionId: s.id })
+        }
+        emit({ t: 'status', sessionId: s.id, phase: 'thinking' })
+        const thinkId = uid('thk_')
+        let thinkStarted = false
+        const tSend = Date.now()
+        let ttfbMs = 0
+        let thinkChars = 0
+        try {
+          const r = capThinking(
+            await callLlm(
+              {
+                system,
+                messages: s.messages,
+                tools: toSchemas(tools),
+                target: t,
+                signal,
+                maxTokens,
+                sessionId: a.sessionId,
+                idleMs,
+                connectMs: LIMITS.llmConnectMs
+              },
+              {
+                onText: (d) => {
+                  if (!ttfbMs) ttfbMs = Date.now() - tSend
+                  emit({ t: 'text_delta', sessionId: s.id, text: d })
+                },
+                onThinking: (d) => {
+                  if (!ttfbMs) ttfbMs = Date.now() - tSend
+                  if (thinkChars >= LIMITS.thinkingChars || !d) return
+                  if (!thinkStarted) {
+                    thinkStarted = true
+                    emit({ t: 'thinking_start', sessionId: s.id, id: thinkId })
+                  }
+                  thinkChars += d.length
+                  emit({ t: 'thinking_delta', sessionId: s.id, id: thinkId, text: d })
+                }
+              }
+            )
+          )
+          const totalMs = Date.now() - tSend
+          log.info(`llm ok: ${t.model.id} (محاولة ${attempt}) blocks=${r.content.length} ttfb=${Math.round(ttfbMs / 1000)}s total=${Math.round(totalMs / 1000)}s`)
+          return r
+        } catch (e) {
+          log.warn(`llm fail: ${t.model.id} (محاولة ${attempt}) ${errMsg(e)}`)
+          throw e
+        }
+      },
+      {
+        signal,
+        maxAttempts,
+        onRetry: ({ attempt }) => {
+          emit({ t: 'text_reset', sessionId: s.id })
+          emit({ t: 'thinking_reset', sessionId: s.id })
+          emit({ t: 'status', sessionId: s.id, phase: 'retrying', label: `إعادة الاتصال ${attempt}` })
+        }
       }
-    } catch {
-      return { reason: 'stop', summary: text, verified: false }
-    }
+    )
   }
-  if (name === 'ask_user') {
-    try {
-      const parsed = JSON.parse(text) as { question?: string; options?: string[] }
-      const optsText = parsed.options?.length ? `\n\nالخيارات: ${parsed.options.join(' · ')}` : ''
-      return { reason: 'needs-input', summary: `${parsed.question ?? ''}${optsText}`, verified: false }
-    } catch {
-      return { reason: 'needs-input', summary: text, verified: false }
+  try {
+    return await attemptWith(a.current, PRIMARY_ATTEMPTS)
+  } catch (e) {
+    if (isAbort(e) || !(e instanceof LlmError)) throw e
+    const retryableFail = e.retryable || e.status === 404
+    if (e.kind !== 'context' && retryableFail && a.fallback && !sameTarget(a.current, a.fallback)) {
+      a.current = a.fallback
+      a.sessionId = opencodeSessionKey(a.current.provider.id, s.projectId)
+      emit({ t: 'notice', sessionId: s.id, level: 'warn', text: `فشل النموذج الأساسي بشكل متكرر؛ التحويل إلى النموذج الاحتياطي (${a.fallback.model.id}).` })
+      emit({ t: 'text_reset', sessionId: s.id })
+      emit({ t: 'thinking_reset', sessionId: s.id })
+      system = await buildSystemPrompt({
+        settings: getSettings(),
+        project: s.project,
+        plan: s.plan,
+        model: a.current.model,
+        lastUserText: [...s.messages].reverse().find((m) => m.role === 'user')?.content.find((b) => b.type === 'text')?.text?.slice(0, 2000),
+        mode: s.mode,
+        memory: memoryFor(s),
+        display: desktopController.logicalSize()
+      })
+      return await attemptWith(a.current, FALLBACK_ATTEMPTS)
     }
+    throw e
   }
-  return null
 }
 
-function findProvider(ctx: AppContext, id: string): ProviderRecord | undefined {
-  return (ctx.state.get().providers as ProviderRecord[]).find((r) => r.id === id)
+function capThinking(r: LlmResult): LlmResult {
+  const max = LIMITS.thinkingChars
+  if (!r.content.some((b) => b.type === 'thinking' && b.text.length > max)) return r
+  return {
+    ...r,
+    content: r.content.map((b) =>
+      b.type === 'thinking' && b.text.length > max ? { ...b, text: `${b.text.slice(0, max)}\n[… اختُصر التفكير المحفوظ …]` } : b
+    )
+  }
 }
 
-export type { PlanStep }
+async function summarizer(a: Active, signal: AbortSignal) {
+  return async (prompt: string, text: string): Promise<string> => {
+    const r = await withRetry(
+      () => callLlm({ system: prompt, messages: [{ role: 'user', content: [{ type: 'text', text }] }], tools: [], target: a.current, signal, maxTokens: 3000, sessionId: a.sessionId, idleMs: IDLE_MS_PATIENT, connectMs: LIMITS.llmConnectMs }, { onText: () => {}, onThinking: () => {} }),
+      { signal, onRetry: () => {}, maxAttempts: SUMMARIZER_ATTEMPTS }
+    )
+    return r.content.map((b) => (b.type === 'text' ? b.text : '')).join('').trim() || '(ملخص فارغ)'
+  }
+}
+
+export { LoopGuard, callSignature } from './loopGuard'
+
+function persistPush(s: Session, msgs: Msg[]) {
+  s.messages.push(...msgs)
+  db().msgAppend(s.id, msgs.map(persistable))
+  s.save()
+}
+
+function drainPending(s: Session) {
+  if (!s.pending.length) return
+  const items = s.pending.splice(0)
+  const blocks: Block[] = []
+  for (const item of items) {
+    const t = typeof item === 'string' ? item : item.text
+    if (t?.trim()) blocks.push({ type: 'text', text: `[توجيه من المستخدم أثناء العمل]\n${t.trim()}` })
+    const imgs = typeof item === 'string' ? undefined : item.images
+    if (imgs?.length) {
+      for (const im of imgs) blocks.push({ type: 'image', mediaType: im.mediaType, data: im.data })
+    }
+  }
+  if (!blocks.length) return
+  persistPush(s, [{ role: 'user', content: blocks }])
+}
+
+function truncationAdvice(times: number): string {
+  const base =
+    'قُطع ردك عند حد الإخراج قبل اكتماله. استدعاء أداة كبير واحد لن ينجح مهما أعدته — قسّم العمل: ' +
+    'اكتب الملف الأساسي بحجم صغير، ثم أضف الباقي على دفعات عبر write_file مع append=true، ' +
+    'أو وزّع المحتوى على أكثر من ملف/وحدة واستوردها. لا تعِد إرسال نفس المحتوى الضخم كما هو.'
+  return times >= 3
+    ? `${base} (حدث هذا ${times} مرات متتالية — قلّل حجم كل استدعاء إلى النصف على الأقل فوراً.)`
+    : base
+}
+
+export interface RunOptions {
+  userText?: string
+  model?: ModelRef
+  images?: ImageAttachment[]
+}
+
+export async function runAgent(s: Session, opts: RunOptions): Promise<void> {
+  if (s.running) {
+    if (opts.userText || opts.images?.length) s.pending.push({ text: opts.userText ?? '', images: opts.images })
+    return
+  }
+  const settings = getSettings()
+  const primary = pickModelRef([opts.model, s.model, settings.defaultModel], resolveModel)
+  if (!primary) {
+    emit({ t: 'notice', sessionId: s.id, level: 'error', text: 'لم يُحدَّد نموذج. أضف مزوداً واختر نموذجاً من الإعدادات.' })
+    emit({ t: 'run_end', sessionId: s.id, reason: 'error' })
+    return
+  }
+  if (!primary.provider.apiKey && !/localhost|127\.0\.0\.1/.test(primary.provider.baseUrl)) {
+    emit({ t: 'notice', sessionId: s.id, level: 'error', text: `مفتاح API غير محفوظ للمزود «${primary.provider.name}».` })
+    emit({ t: 'run_end', sessionId: s.id, reason: 'error' })
+    return
+  }
+  s.model = { providerId: primary.provider.id, modelId: primary.model.id }
+  const sessionKey = opencodeSessionKey(primary.provider.id, s.projectId)
+  const active: Active = { primary, fallback: resolveModel(settings.fallbackModel), current: primary, sessionId: sessionKey }
+  log.info(`run start: ${active.current.provider.name}/${active.current.model.id} رسائل=${s.messages.length} مشروع=${s.projectId ?? 'لا'} session=${sessionKey}`)
+  const images = (opts.images ?? []).filter((im) => im.mediaType.startsWith('image/') && im.data)
+  if (images.length && !active.current.model.vision) {
+    const visionFallback = active.fallback?.model.vision ? active.fallback : null
+    const visionPrimary = listVisionModel()
+    const visionTarget = visionFallback ?? visionPrimary
+    if (visionTarget && !sameTarget(active.current, visionTarget)) {
+      active.current = visionTarget
+      active.sessionId = opencodeSessionKey(visionTarget.provider.id, s.projectId)
+      emit({ t: 'notice', sessionId: s.id, level: 'info', text: `النموذج الأساسي لا يرى الصور — تم التحويل تلقائياً إلى ${visionTarget.model.id} لقراءتها.` })
+      s.model = { providerId: visionTarget.provider.id, modelId: visionTarget.model.id }
+    } else {
+      emit({ t: 'notice', sessionId: s.id, level: 'warn', text: 'النموذج المختار لا يرى الصور — أُرفقت لكنه قد يتجاهلها. اختر نموذجاً يدعم الرؤية لقراءتها.' })
+    }
+  }
+
+  s.running = true
+  s.resumable = true
+  s.abort = new AbortController()
+  const signal = s.abort.signal
+
+  if (s.mode === 'agent') {
+    desktopController.startSession(s.id)
+  }
+
+  if (s.mode === 'agent' && opts.userText?.trim()) {
+    if (!s.memory) s.memory = createAgentMemory(opts.userText)
+    else setAgentGoal(s.memory, opts.userText)
+    s.save()
+  }
+
+  repairDangling(s)
+
+  if (opts.userText || images.length) {
+    if (opts.userText && (s.title === 'محادثة جديدة' || s.title === 'وكيل المتصفح' || s.title === 'إيجنت الكمبيوتر'))
+      s.title = opts.userText.replace(/\s+/g, ' ').slice(0, 60)
+    const blocks: Block[] = []
+    if (opts.userText) blocks.push({ type: 'text', text: opts.userText })
+    for (const im of images) blocks.push({ type: 'image', mediaType: im.mediaType, data: im.data })
+    if (s.mode === 'agent' && active.current.model.vision && !images.length) {
+      try {
+        const initShot = await desktopController.screenshot(true)
+        blocks.push({
+          type: 'text',
+          text: `[لقطة شاشة حية لسطح المكتب الآن (${initShot.width}×${initShot.height}) | المؤشر عند (${initShot.cursorX}, ${initShot.cursorY}) | النافذة النشطة: «${initShot.activeTitle || 'سطح المكتب'}»]`
+        })
+        blocks.push({ type: 'image', mediaType: initShot.mediaType, data: initShot.data })
+      } catch {}
+    }
+    persistPush(s, [{ role: 'user', content: blocks, at: Date.now() }])
+  } else if (s.mode === 'agent') {
+    const digest = s.memory ? actionsDigest(s.memory) : ''
+    const blocks: Block[] = [{ type: 'text', text: `[استئناف العمل]\n${digest ? `${digest}\n` : ''}افحص الشاشة الآن ثم تابع من حيث توقفت دون إعادة ما أُنجز.` }]
+    if (active.current.model.vision) {
+      try {
+        const shot = await desktopController.screenshot(true)
+        blocks.push({ type: 'image', mediaType: shot.mediaType, data: shot.data })
+      } catch {}
+    }
+    persistPush(s, [{ role: 'user', content: blocks, at: Date.now() }])
+  } else s.save()
+
+  if (opts.userText || images.length || s.runStartedAt == null) s.startRunBudget()
+
+  const guard = new LoopGuard()
+  let reason: 'done' | 'stopped' | 'error' | 'max_steps' = 'done'
+  let emptyRetries = 0
+  let truncations = 0
+
+  try {
+    for (let step = 1; ; step++) {
+      if (signal.aborted) throw abortError()
+      if (s.mode === 'agent') {
+        await desktopController.waitWhilePaused(signal)
+        if (signal.aborted) throw abortError()
+        if (desktopController.consumeTakeoverReturned()) {
+          const takeoverBlocks: Block[] = [
+            {
+              type: 'text',
+              text: 'The human has taken over and made changes. Re-assess the current screen state and continue the task.\n[استلم المستخدم التحكم بالماوس والكيبورد مؤقتاً وأجرى تعديلات على الشاشة. افحص اللقطة الجديدة المرفقة بعناية وأكمل المهمة.]'
+            }
+          ]
+          if (active.current.model.vision) {
+            try {
+              const fresh = await desktopController.screenshot(true)
+              takeoverBlocks.push({ type: 'image', mediaType: fresh.mediaType, data: fresh.data })
+            } catch {}
+          }
+          persistPush(s, [{ role: 'user', content: takeoverBlocks }])
+        }
+        desktopController.incrementStep()
+        desktopController.setStatus('thinking')
+      }
+      s.cumulativeSteps++
+      if (s.mode !== 'agent' && step > settings.maxSteps) {
+        reason = 'max_steps'
+        emit({ t: 'notice', sessionId: s.id, level: 'warn', text: `بلغ الوكيل حد الخطوات (${settings.maxSteps}). يمكنك الضغط على «استئناف» للمتابعة.` })
+        break
+      }
+      drainPending(s)
+
+      const tools = toolsForMode(s.mode)
+      const toolsChars = JSON.stringify(toSchemas(tools)).length
+      const lastUserText = [...s.messages].reverse().find((m) => m.role === 'user')?.content.find((b) => b.type === 'text')?.text?.slice(0, 2000)
+      let system = await buildSystemPrompt({ settings, project: s.project, plan: s.plan, model: active.current.model, lastUserText, mode: s.mode, memory: memoryFor(s), display: desktopController.logicalSize() })
+      let trimmed = dropStaleImages(s.messages)
+      trimmed = shrinkOld(s.messages) || trimmed
+      let tokens = estimateTokens(system, s.messages, toolsChars)
+      const win = active.current.model.contextWindow
+      emit({ t: 'usage', sessionId: s.id, contextTokens: tokens, contextWindow: win, step })
+      const compactAt = win * (compactAtThreshold(win, settings.compactAtPercent) / 100)
+      if (tokens > compactAt) {
+        const compacted = await compactNow(s, active, signal)
+        if (!compacted) {
+          trimmed = shrinkOld(s.messages, 4, true) || trimmed
+          emit({ t: 'notice', sessionId: s.id, level: 'warn', text: 'تعذّر تلخيص السياق؛ قُلّصت الرسائل القديمة بقوة بدلاً من ذلك.' })
+        }
+        system = await buildSystemPrompt({ settings, project: s.project, plan: s.plan, model: active.current.model, lastUserText, mode: s.mode, memory: memoryFor(s), display: desktopController.logicalSize() })
+        tokens = estimateTokens(system, s.messages, toolsChars)
+      }
+
+      let result
+      try {
+        result = await llmTurn(s, active, system, tools, signal)
+      } catch (e) {
+        if (e instanceof LlmError && e.kind === 'context') {
+          emit({ t: 'notice', sessionId: s.id, level: 'warn', text: 'تجاوز السياق حد النموذج؛ جارٍ التلخيص ثم المحاولة مجدداً.' })
+          trimmed = shrinkOld(s.messages, 4, true) || trimmed
+          const compacted = await compactNow(s, active, signal, 6)
+          if (!compacted) {
+            shrinkOld(s.messages, 4, true)
+            emit({ t: 'notice', sessionId: s.id, level: 'warn', text: 'فشل تلخيص السياق؛ قُلّص السجل بقوة قبل إعادة المحاولة.' })
+          }
+          system = await buildSystemPrompt({ settings, project: s.project, plan: s.plan, model: active.current.model, lastUserText, mode: s.mode, memory: memoryFor(s), display: desktopController.logicalSize() })
+          result = await llmTurn(s, active, system, tools, signal)
+        } else throw e
+      }
+
+      const ctx = makeCtx(s, signal, active.current.model.vision, () => active.current.model)
+      const uses = result.content.filter((b): b is Extract<Block, { type: 'tool_use' }> => b.type === 'tool_use')
+      result.content = promoteReasoningAnswer(result.content)
+      const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('').trim()
+      if (s.mode === 'agent' && text) {
+        desktopController.setThought(text)
+      }
+      emit({ t: 'assistant_done', sessionId: s.id })
+      tokens = result.usage.input || tokens
+
+      const broken = uses.filter((u) => (u.input as { __parse_error?: string } | undefined)?.__parse_error)
+      if (result.truncated) {
+        truncations++
+        emit({
+          t: 'notice',
+          sessionId: s.id,
+          level: 'warn',
+          text:
+            `قُطع رد النموذج عند حد الإخراج (${getSettings().maxOutputTokens} رمز)` +
+            (broken.length ? ` قبل اكتمال استدعاء «${broken[0].name}» — فلم يُنفَّذ.` : '.')
+        })
+      }
+
+      if (!uses.length && !text) {
+        if (result.truncated) {
+          persistPush(s, [{ role: 'user', content: [{ type: 'text', text: truncationAdvice(truncations) }] }])
+          continue
+        }
+        if (++emptyRetries > 2) throw new LlmError('أعاد النموذج ردوداً فارغة متكررة. جرّب نموذجاً آخر.')
+        persistPush(s, [{ role: 'user', content: [{ type: 'text', text: 'ردّك السابق كان فارغاً. تابع العمل: استخدم أداة أو قدّم الملخص النهائي.' }] }])
+        continue
+      }
+      emptyRetries = 0
+
+      if (!uses.length) {
+        persistPush(s, [{ role: 'assistant', content: result.content }])
+        if (result.truncated) {
+          persistPush(s, [{ role: 'user', content: [{ type: 'text', text: truncationAdvice(truncations) }] }])
+          continue
+        }
+        if (s.pending.length) continue
+        reason = 'done'
+        break
+      }
+
+      const assistantMsg: Msg = { role: 'assistant', content: result.content }
+      s.messages.push(assistantMsg)
+      let results: Map<string, ToolResult>
+      try {
+        results = await execTools(s, uses, ctx)
+      } catch (e) {
+        s.messages.pop()
+        throw e
+      }
+      const blocks: Block[] = uses.map((u) => {
+        if (broken.some((b) => b.id === u.id))
+          return {
+            type: 'tool_result',
+            tool_use_id: u.id,
+            content: `قُطع هذا الاستدعاء عند حد الإخراج قبل اكتمال JSON، فلم يُنفَّذ. ${truncationAdvice(truncations)}`,
+            is_error: true
+          }
+        const r = results.get(u.id) ?? { content: 'لم تُنفَّذ (أُوقفت العملية).', isError: true }
+        const images = ctx.vision ? r.images : undefined
+        return { type: 'tool_result', tool_use_id: u.id, content: r.content, is_error: !!r.isError, images }
+      })
+      const verdict = guard.check(uses, results)
+      if (verdict.warning) {
+        blocks.push({ type: 'text', text: verdict.warning })
+      }
+
+      if (s.mode === 'agent' && s.memory) {
+        const mem = s.memory
+        for (const u of uses) {
+          const r = results.get(u.id)
+          if (r && (u.name === 'computer' || u.name === 'desktop_app')) {
+            recordAction(mem, step, describeUse(u), String(r.content ?? '').split('\n')[0], !r.isError)
+          }
+          if (!r || r.isError) continue
+          if (u.name === 'write_file' || u.name === 'edit_file') {
+            recordAgentFile(mem, String((u.input as { path?: unknown } | undefined)?.path ?? ''), u.name === 'edit_file' ? 'edit' : 'write', step)
+          }
+        }
+      }
+
+      const resultMsg: Msg = { role: 'user', content: blocks }
+      s.messages.pop()
+      persistPush(s, [assistantMsg, resultMsg])
+      const dropped = dropStaleImages(s.messages)
+      const shrunk = shrinkOld(s.messages)
+      if (dropped || shrunk || trimmed) db().msgReplace(s.id, s.messages.map(persistable))
+      if (s.project) touchProject(s.project.id)
+      if (signal.aborted) throw abortError()
+    }
+  } catch (e) {
+    if (isAbort(e)) reason = 'stopped'
+    else {
+      reason = 'error'
+      const msg = e instanceof LlmError ? e.message : errMsg(e)
+      log.error('انتهت جولة الوكيل بخطأ', msg)
+      emit({ t: 'notice', sessionId: s.id, level: 'error', text: `توقف الوكيل: ${msg}. حالتك محفوظة ويمكنك الضغط على «استئناف».` })
+    }
+  } finally {
+    s.running = false
+    s.abort = null
+    s.resumable = reason === 'error' || reason === 'max_steps'
+    for (const [, resolve] of s.asks) resolve('')
+    s.save()
+    if (s.mode === 'agent') {
+      desktopController.endSession(reason)
+      if (reason === 'done' && s.memory?.goal) {
+        try {
+          recordTaskOutcome(s.memory.goal, lastAssistantText(s), s.memory.files.map((f) => f.path))
+        } catch {}
+      }
+    }
+    if (reason === 'done' && s.project) void checkpoint(s.project.dir, 'نهاية المهمة').catch(() => {})
+    emit({ t: 'status', sessionId: s.id, phase: 'idle' })
+    emit({ t: 'run_end', sessionId: s.id, reason })
+  }
+}
+
+export async function compactNow(s: Session, a: Active, signal: AbortSignal, keep = 10): Promise<boolean> {
+  emit({ t: 'status', sessionId: s.id, phase: 'compacting', label: 'تلخيص السياق' })
+  try {
+    const summarize = await summarizer(a, signal)
+    let summary = ''
+    const compacted = await buildCompacted(s.messages, async (prompt, text) => (summary = await summarize(prompt, text)), keep)
+    if (!compacted) return false
+    if (!summary.trim() || summary.trim() === '(ملخص فارغ)') {
+      log.warn('فشل التلخيص: ملخص فارغ — أُبقي السجل كما هو')
+      return false
+    }
+    if (s.mode === 'agent' && s.memory) {
+      const digest = actionsDigest(s.memory)
+      const first = compacted[0]?.content[0]
+      if (digest && first && first.type === 'text') first.text += `\n\n${digest}`
+    }
+    s.messages = compacted
+    db().msgReplace(s.id, compacted.map(persistable))
+    emit({ t: 'notice', sessionId: s.id, level: 'info', text: 'جرى تلخيص الجزء القديم من المحادثة للحفاظ على السياق.' })
+    return true
+  } catch (e) {
+    if (isAbort(e)) throw e
+    log.warn('فشل التلخيص', errMsg(e))
+    return false
+  }
+}
+
+export function repairDangling(s: Session) {
+  const stubs: Block[] = []
+  for (let i = s.messages.length - 1; i >= 0; i--) {
+    const m = s.messages[i]
+    if (m.role !== 'assistant') continue
+    const uses = m.content.filter((b) => b.type === 'tool_use') as Extract<Block, { type: 'tool_use' }>[]
+    if (!uses.length) continue
+    const satisfied = (id: string) =>
+      s.messages.slice(i + 1).some((later) => later.content.some((b) => b.type === 'tool_result' && b.tool_use_id === id))
+    const dangling = uses.filter((u) => !satisfied(u.id))
+    for (const u of dangling)
+      stubs.push({
+        type: 'tool_result',
+        tool_use_id: u.id,
+        content: 'انقطع التنفيذ قبل اكتمال هذه الأداة (إغلاق أو إيقاف). افحص الحالة الفعلية قبل المتابعة.',
+        is_error: true
+      })
+  }
+  if (stubs.length) persistPush(s, [{ role: 'user', content: stubs }])
+}
+
+export function answerAsk(s: Session, askId: string, value: string) {
+  s.asks.get(askId)?.(value)
+}

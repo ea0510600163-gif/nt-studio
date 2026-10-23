@@ -1,31 +1,14 @@
-# الاعتماديات والمخرجات
-node_modules/
-out/
-dist/
-release/
-coverage/
-.vite/
-*.tsbuildinfo
-
-# أسرار — لا تُرفع أبداً
+node_modules
+out
+dist
+release
+release-build
+outputs
+*.log
+*.zip
 .env
 .env.*
 !.env.example
-
-# سجلات ومخازن محلية
-logs/
-*.log
-npm-debug.log*
-pnpm-debug.log*
-
-# مساحة عمل الوكلاء (سجل وبريفات)
-.superpowers/
-
-# نظام التشغيل والمحررات
-.DS_Store
-Thumbs.db
-desktop.ini
-.idea/
-.vscode/*
-!.vscode/extensions.json
-!.vscode/settings.json
+.agent
+.zwork
+.workbuddy-ai

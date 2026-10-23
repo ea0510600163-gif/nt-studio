@@ -1,6 +1,5 @@
 import type { Block } from '../providers/types'
 
-/** بصمة ثابتة للاستدعاء: المفاتيح مرتبة، وقيم السلاسل مقصوصة — لا تتأثر بترتيب JSON ولا بطول الرد */
 export function callSignature(name: string, input: unknown): string {
   const norm = (v: unknown, d = 0): unknown => {
     if (d > 3) return '…'
@@ -24,37 +23,22 @@ export function callSignature(name: string, input: unknown): string {
 }
 
 export interface LoopVerdict {
-  /** رسالة توجّه لتغيير الاستراتيجية، أو null إن لم يوجد تكرار */
   warning: string | null
-  /** يجب إيقاف الجولة: التكرار تجاوز كل الاستراتيجيات المعقولة */
   fatal: boolean
 }
 
-/* ───────── P1-2: كشف دلالي — الهدف والنتيجة، لا البصمة وحدها ───────── */
-
-/** نتيجة أداة واحدة كما تُمرَّر للحارس مع الاستدعاءات (اختياري، للكشف الواعي بالنتيجة). */
 export interface ToolOutcome {
   isError?: boolean
   content?: unknown
 }
 
-/**
- * ما يقبله check كمدخل نتائج: خريطة بالمُعرّف، أو سجل عادي بالمُعرّف،
- * أو كتل tool_result خام (تُفهرَس عبر tool_use_id). غيابه يعني تخطّي
- * الكشف الواعي بالنتيجة فقط — كل الفحوص القديمة تعمل كما هي.
- */
 export type OutcomesInput =
   | Map<string, ToolOutcome>
   | Record<string, ToolOutcome>
   | Extract<Block, { type: 'tool_result' }>[]
 
-/** حدّ تكدّس الأداة الواحدة داخل النافذة: أدوات القراءة — رُفع من 18 إلى 24
- * لأن النافذة كبرت من 40 إلى 60 (نفس النسبة 45%) + نماذج أكبر تحتاج قراءة أكثر. */
 export const READ_TOOL_LIMIT = 24
-/** حدّ تكدّس الأداة الواحدة داخل النافذة: أدوات الكتابة/التنفيذ — رُفع من 12 إلى 18
- * (نفس نسبة 30% من النافذة 60). */
 export const WRITE_TOOL_LIMIT = 18
-/** أدوات تُحسب كتابةً/تنفيذاً لغرض حدّ التكدّس: طفرات نظام الملفات + تنفيذ الأوامر + الرفع الخارجي. */
 export const WRITE_TOOLS: ReadonlySet<string> = new Set([
   'write_file',
   'edit_file',
@@ -62,37 +46,23 @@ export const WRITE_TOOLS: ReadonlySet<string> = new Set([
   'move_path',
   'make_dir',
   'run_command',
-  'browser_upload', // طفرة خارجية: إرسال ملف محلي لموقع ويب
+  'browser_upload'
 ])
-/** أدوات فحص شفافة (قراءة بلا هدف): تُتخطى عند عدّ تكرار فعل المتصفح العالق */
+
 const PROBE_TOOLS: ReadonlySet<string> = new Set([
   'browser_snapshot',
   'browser_screenshot',
   'browser_console',
   'browser_audit'
 ])
-/** تكرار الفعل على هدف المتصفح نفسه قبل الإنذار (تتخلله لقطات فقط) */
-const BROWSER_STUCK_REPEATS = 4
-/** الاستدعاء نفسه حرفياً يتكرر توالياً: عدد المرات اللازم للإنذار (5 — القراءة التدريجية والاستكشاف يحتاجان صبراً قبل اتهام الوكيل بالحلقة). */
-export const STREAK_LIMIT = 5
-/** تناوب A→B→A→B على الهدف نفسه: عدد الدورات (زوج A,B) اللازم للإنذار. */
-export const ALTERNATION_CYCLES = 3
-/** الأداة نفسها تخطئ بالنص نفسه: عدد التكرارات اللازم للإنذار (5 — محاولات الإصلاح المشروعة تأخذ نفساً). */
-export const OUTCOME_REPEAT = 5
-/** طول بادئة نص الخطأ المستعملة مفتاحاً للتماثل (بعد طيّ الفراغات). */
-export const ERROR_PREFIX_LEN = 80
 
-/** فاصل مفتاح العدّ الواعي بالنتيجة: اسم الأداة + بادئة الخطأ (لا يظهر في أسماء الأدوات ولا البادئات المطوية). */
+const BROWSER_STUCK_REPEATS = 4
+export const STREAK_LIMIT = 5
+export const ALTERNATION_CYCLES = 3
+export const OUTCOME_REPEAT = 5
+export const ERROR_PREFIX_LEN = 80
 const ERR_KEY_SEP = ' | '
 
-/**
- * الهدف المنطقي للاستدعاء: أيّ معامل يُسمّي الملف (path، أو from/to للنقل) —
- * مطبّع (شرطات، حالة الأحرف) حتى تُطابَق `src\a.ts` مع `src/a.ts`.
- * ثم أهداف المتصفح (ref/selector/text/url/target/dir) ببادئة `browser:` مميزة،
- * حتى تُكتشف حلقات `snapshot↔click` على العنصر نفسه.
- * تُرجع null عندما لا يُسمّي الاستدعاء هدفاً (مسوحات بلا path، أوامر، أسئلة،
- * ونقرات الإحداثيات x/y وحدها — فتكرارها سير شرعي في الألعاب والكانفس).
- */
 export function normalizeTarget(input: unknown): string | null {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return null
   const o = input as Record<string, unknown>
@@ -117,10 +87,6 @@ export function normalizeTarget(input: unknown): string | null {
   return null
 }
 
-/**
- * بادئة نص الخطأ مفتاحاً للتماثل: تُطوى الفراغات وتُقصّ إلى ERROR_PREFIX_LEN.
- * تُرجع null للنص الفارغ وغير النصي — فلا يُحسب خطأ بلا نص تكراراً أبداً.
- */
 export function errorPrefix(content: unknown): string | null {
   if (typeof content !== 'string') return null
   const t = content.trim().replace(/\s+/g, ' ')
@@ -143,18 +109,9 @@ function toOutcomeMap(outcomes?: OutcomesInput): Map<string, ToolOutcome> {
 interface HistEntry {
   name: string
   target: string | null
-  /**
-   * مفتاح مقطع القراءة لأداة read_file (مثلاً `1-4000`)، وnull لغيرها.
-   * يُستعمل لتمييز التصفّح التدريجي لملف كبير (مقاطع متقدمة = تقدّم شرعي)
-   * عن تكرار المقطع نفسه — انظر findAlternation.
-   */
   page: string | null
 }
 
-/**
- * مفتاح مقطع القراءة: يُشتق من start_line/end_line كما تحسبهما أداة read_file
- * نفسها (الافتراض: من السطر 1، عرض 4000 سطر). مقطعان مختلفان ⇒ مفتاحان مختلفان.
- */
 export function readPageKey(name: string, input: unknown): string | null {
   if (name !== 'read_file' || !input || typeof input !== 'object' || Array.isArray(input)) return null
   const o = input as Record<string, unknown>
@@ -163,15 +120,6 @@ export function readPageKey(name: string, input: unknown): string | null {
   return `${s}-${e}`
 }
 
-/**
- * أطول ذيل متناوب صارم بين اسمين متميزين على هدف واحد غير فارغ:
- * A→B→A→B… (كل جارين مختلفان، والهدف نفسه). تُرجع null عندما لا يوجد
- * ذيل يستحق الفحص (أقصر من 3 دورات، أو بلا هدف، أو بغير اسمين بالضبط).
- *
- * ذكاء التصفّح التدريجي: إن تقدّمت مقاطع القراءة داخل الذيل (read_file للمقطع
- * 1-4000 ثم 4001-8000…) فهذا تصفّح شرعي لملف كبير لا حلقة — تُرجع null ولو
- * طال التناوب. الحلقة الحقيقية تعيد المقطع نفسه.
- */
 function findAlternation(hist: HistEntry[]): { a: string; b: string; target: string; cycles: number } | null {
   const n = hist.length
   if (n < ALTERNATION_CYCLES * 2) return null
@@ -207,21 +155,6 @@ function findAlternation(hist: HistEntry[]): { a: string; b: string; target: str
   return { a, b, target, cycles }
 }
 
-/**
- * الحارس كان يعتمد على بصمة تشمل ناتج الأداة، فكان التمرير واللقطات بأبعاد مختلفة
- * لا تُحسب تكراراً — أي أن أكثر التكرار الذي يحدث فعلاً كان يمرّ بلا إنذار.
- * الآن: بصمة الاستدعاء وحدها (فارغة من المتغيّرات) + عدّ لكل أداة + سقف إنذارات.
- *
- * P1-2 (دلالي): فوق ذلك (1) كشف واعٍ بالهدف — تناوب أداتين على الملف نفسه
- * 3 دورات على الأقل يُنذَّر ولو اختلفت المعاملات؛ (2) كشف واعٍ بالنتيجة —
- * الأداة نفسها تخطئ بالنص نفسه 5 مرات على الأقل تُنذَّر (نصوص مختلفة =
- * سير شرعي، لا إنذار)؛ (3) حدّ التكدّس لأدوات الكتابة 12 بدل 18
- * (القراءة تبقى 18 كما كانت).
- *
- * التصفّح التدريجي: قراءة ملف كبير مقطعاً بعد مقطع (start_line يتقدّم) تقدّمٌ
- * شرعي — مقاطع مختلفة لا تُحسب تكراراً حرفياً (البصمة تميّزها أصلاً) ولا تُشكّل
- * تناوباً مع التعديل (page key)، بينما إعادة المقطع نفسه 5 مرات تُنذَّر.
- */
 export class LoopGuard {
   private sigs: string[] = []
   private hist: HistEntry[] = []
@@ -229,9 +162,6 @@ export class LoopGuard {
   private nameCounts = new Map<string, number>()
   private errCounts = new Map<string, number>()
   private strikes = 0
-  /** رُفعت النافذة من 40 إلى 60: التكرار البطيء (كل 45-50 خطوة) كان يمرّ
-   * بلا كشف لأن النافذة القديمة ت expired قبل أن يتراكم العدد الكافي.
-   * 60 تغطي هذه الحالات دون أن تُبطّل الكشف السريع. */
   private window = 60
   static readonly FATAL_AFTER = 4
 
@@ -273,7 +203,6 @@ export class LoopGuard {
       }
     }
 
-    // 1) نفس الاستدعاء بالضبط خمس مرات متتالية (STREAK_LIMIT — صبر على الاستكشاف والقراءة التدريجية)
     const last = pass[pass.length - 1]
     let streak = 0
     if (last) for (let i = this.sigs.length - 1; i >= 0 && this.sigs[i] === last; i--) streak++
@@ -286,7 +215,6 @@ export class LoopGuard {
       )
     }
 
-    // 2) تناوب أداتين على الهدف نفسه 3 دورات على الأقل (P1-2: واعٍ بالهدف)
     const alt = findAlternation(this.hist)
     if (alt) {
       this.reset()
@@ -304,8 +232,6 @@ export class LoopGuard {
       )
     }
 
-    // 2ب) الفعل نفسه على هدف المتصفح نفسه تتخلله لقطات فحص فقط (حلقة عالقة:
-    //     نقرة تفشل ← لقطة ← النقرة نفسها ← لقطة… — لا يكشفها التناوب ولا الـ streak)
     const tailEntry = this.hist[this.hist.length - 1]
     if (tailEntry?.target?.startsWith('browser:')) {
       let reps = 0
@@ -328,7 +254,6 @@ export class LoopGuard {
       }
     }
 
-    // 3) الأداة نفسها تخطئ بالنص نفسه 5 مرات على الأقل (OUTCOME_REPEAT: واعٍ بالنتيجة)
     for (const key of batchErrKeys) {
       const n = this.errCounts.get(key) ?? 0
       if (n >= OUTCOME_REPEAT) {
@@ -344,17 +269,14 @@ export class LoopGuard {
       }
     }
 
-    // 4) تكدّس بلا تقدّم: أداة واحدة تستهلك النافذة وحدها
-    //    (P1-2: أدوات الكتابة/التنفيذ 12، أدوات القراءة 18 — كما كانت)
     for (const [name, n] of this.nameCounts)
       if (n >= (WRITE_TOOLS.has(name) ? WRITE_TOOL_LIMIT : READ_TOOL_LIMIT)) {
         this.reset()
-        return this.penalize(`استدعاءت ${name} ${n} مرة دون نتيجة جديدة. أنت في حلقة ولا تتقدّم.`)
+        return this.penalize(`استدعيتَ ${name} ${n} مرة دون نتيجة جديدة — أنت في حلقة ولا تتقدّم.`)
       }
     return { warning: null, fatal: false }
   }
 
-  /** العقوبة تُصفّر النافذة كاملةً (بصمات + أهداف + أخطاء + عدّادات) فيلزم تكرار جديد للإنذار التالي. */
   private reset(): void {
     this.sigs.length = 0
     this.hist.length = 0

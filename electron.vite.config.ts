@@ -1,43 +1,34 @@
 import { defineConfig } from 'electron-vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
+import { resolve } from 'path'
 
-/**
- * بنية المشروع تتبع اصطلاح electron-vite الرسمي:
- *   src/main      -> عملية Electron الرئيسية   (منطق الوكيل + Node + القرص)
- *   src/preload   -> جسر contextBridge          (الواجهة الوحيدة المكشوفة للواجهة الأمامية)
- *   src/renderer  -> تطبيق React                (بلا أي وصول لـ Node)
- *
- * لا يوجد "type": "module" عمداً، حتى تُبنى main/preload بصيغة CommonJS
- * ويبقى preload قابلاً للتشغيل داخل renderer مُعزل (sandbox: true).
- */
+const alias = { '@shared': resolve('src/shared') }
+
+function manualChunks(id: string): string | undefined {
+  const n = id.replace(/\\/g, '/')
+  const at = n.lastIndexOf('node_modules/')
+  if (at < 0) return undefined
+  const parts = n.slice(at + 'node_modules/'.length).split('/')
+  const name = parts[0].startsWith('@') ? `${parts[0]}/${parts[1]}` : parts[0]
+  if (name === 'react' || name === 'react-dom' || name === 'scheduler') return 'vendor-react'
+  if (name.startsWith('@xterm/') || name === 'xterm') return 'vendor-xterm'
+  if (name === 'highlight.js') return 'vendor-highlight'
+  if (name === 'lucide-react') return 'vendor-icons'
+  return undefined
+}
+
 export default defineConfig({
   main: {
-    build: {
-      outDir: 'out/main',
-      sourcemap: true,
-    },
+    resolve: { alias },
+    build: { rollupOptions: { external: ['better-sqlite3', 'node-pty'] } }
   },
   preload: {
-    build: {
-      outDir: 'out/preload',
-      sourcemap: true,
-    },
+    resolve: { alias }
   },
   renderer: {
-    root: 'src/renderer',
+    resolve: { alias: { ...alias, '@': resolve('src/renderer') } },
     plugins: [react(), tailwindcss()],
-    build: {
-      outDir: 'out/renderer',
-      sourcemap: true,
-      // CSP صارمة: لا inline scripts، ولا eval، ولا مصادر خارجية غير معروفة
-      rollupOptions: {
-        output: {
-          manualChunks: {
-            react: ['react', 'react-dom'],
-          },
-        },
-      },
-    },
-  },
+    build: { rollupOptions: { output: { manualChunks } } }
+  }
 })

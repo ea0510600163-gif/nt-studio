@@ -1,181 +1,182 @@
-import { promises as fs } from 'node:fs'
-import path from 'node:path'
-import type { AppContext } from '../core/context'
-import { runAgent, type RunResult } from './loop'
-import type { AgentEvent } from './types'
+import type { ModelRef, ProjectInfo, SessionInfo, SessionMode, TodoItem } from '@shared/types'
+import { db } from '../store/db'
+import { getProject } from '../workspace/projects'
+import type { Msg } from '../providers/types'
+import { uid } from '../util'
+import { normalizeMemory, type AgentMemory } from './agentMemory'
 
-/**
- * مدير الجلسات.
- *
- * لكل جلسة: سجل كامل على القرص (.agent/session-*.jsonl) يسمح بالاستئناف بعد
- * إغلاق التطبيق — وهذا ما يجعل المشروع "ذاكرته قويّة" فعليًا لا مجرد كلام.
- */
-
-export interface SessionRecord {
+interface SessionMeta {
   id: string
-  projectPath: string | null
-  providerId: string
-  modelId: string
-  prompt: string
-  status: 'running' | 'done' | 'error' | 'aborted' | 'needs-input'
-  startedAt: number
-  endedAt: number | null
-  summary: string
-  verified: boolean
+  projectId: string | null
+  title: string
+  updatedAt: number
+  resumable: boolean
+  plan: TodoItem[]
+  model: ModelRef | null
+  runStartedAt: number | null
+  cumulativeSteps: number
+  mode?: SessionMode
+  memory?: AgentMemory | null
 }
 
-interface SessionRuntime {
-  id: string
-  projectPath: string | null
-  abort: AbortController
-  startedAt: number
-  active: boolean
+export interface PendingUserMessage {
+  text: string
+  images?: { mediaType: string; data: string }[]
 }
 
-const runtimes = new Map<string, SessionRuntime>()
-
-export class AgentRunner {
-  private current: SessionRuntime | null = null
-
-  constructor(private readonly ctx: AppContext) {}
-
-  isRunning(): boolean {
-    return this.current?.active === true
+export class Session {
+  running = false
+  abort: AbortController | null = null
+  pending: PendingUserMessage[] = []
+  asks = new Map<string, (v: string) => void>()
+  children = new Set<AbortController>()
+  project: ProjectInfo | null = null
+  constructor(
+    public id: string,
+    public projectId: string | null,
+    public title: string,
+    public messages: Msg[] = [],
+    public plan: TodoItem[] = [],
+    public model: ModelRef | null = null,
+    public resumable = false,
+    public updatedAt = Date.now(),
+    public runStartedAt: number | null = null,
+    public cumulativeSteps = 0,
+    public mode: SessionMode = 'studio',
+    public memory: AgentMemory | null = null
+  ) {
+    if (projectId) this.project = getProject(projectId) ?? null
   }
-
-  currentSession(): string | null {
-    return this.current?.id ?? null
+  meta(): SessionMeta {
+    return { id: this.id, projectId: this.projectId, title: this.title, updatedAt: this.updatedAt, resumable: this.resumable, plan: this.plan, model: this.model, runStartedAt: this.runStartedAt, cumulativeSteps: this.cumulativeSteps, mode: this.mode, memory: this.memory }
   }
-
-  stop(): boolean {
-    if (!this.current?.active) return false
-    this.current.abort.abort()
-    return true
+  startRunBudget(now = Date.now()): void {
+    this.runStartedAt = now
+    this.cumulativeSteps = 0
+    this.save()
   }
-
-  async run(input: {
-    prompt: string
-    providerId: string
-    modelId: string
-    projectPath: string | null
-    onEvent: (event: AgentEvent) => void
-  }): Promise<RunResult> {
-    if (this.current?.active) throw new Error('there is already a running task')
-
-    const id = `s-${Date.now().toString(36)}`
-    const abort = new AbortController()
-    const runtime: SessionRuntime = {
-      id,
-      projectPath: input.projectPath,
-      abort,
-      startedAt: Date.now(),
-      active: true,
-    }
-    this.current = runtime
-    runtimes.set(id, runtime)
-
-    const record: SessionRecord = {
-      id,
-      projectPath: input.projectPath,
-      providerId: input.providerId,
-      modelId: input.modelId,
-      prompt: input.prompt,
-      status: 'running',
-      startedAt: runtime.startedAt,
-      endedAt: null,
-      summary: '',
-      verified: false,
-    }
-
-    await this.appendEvent(input.projectPath, { kind: 'start', at: runtime.startedAt, prompt: input.prompt })
-
-    let result: RunResult
-    try {
-      result = await runAgent(this.ctx, {
-        providerId: input.providerId,
-        modelId: input.modelId,
-        prompt: input.prompt,
-        projectRoot: input.projectPath,
-        sessionId: id,
-        signal: abort.signal,
-        emit: input.onEvent,
-      })
-    } catch (e) {
-      const message = (e as Error).message
-      record.status = 'error'
-      record.endedAt = Date.now()
-      record.summary = message
-      await this.appendEvent(input.projectPath, { kind: 'error', at: Date.now(), message })
-      input.onEvent({ type: 'failed', message })
-      runtime.active = false
-      this.current = null
-      return {
-        reason: 'error',
-        summary: message,
-        verified: false,
-        steps: 0,
-        inputTokens: 0,
-        outputTokens: 0,
-        durationMs: Date.now() - runtime.startedAt,
-        error: message,
-      }
-    }
-
-    record.status =
-      result.reason === 'aborted'
-        ? 'aborted'
-        : result.reason === 'error'
-          ? 'error'
-          : result.reason === 'needs-input'
-            ? 'needs-input'
-            : 'done'
-    record.endedAt = Date.now()
-    record.summary = result.summary
-    record.verified = result.verified
-
-    await this.appendEvent(input.projectPath, {
-      kind: 'end',
-      at: Date.now(),
-      reason: result.reason,
-      summary: result.summary,
-      verified: result.verified,
-      tokens: result.inputTokens + result.outputTokens,
-      steps: result.steps,
-    })
-
-    runtime.active = false
-    this.current = null
-    return result
+  clearRunBudget(): void {
+    this.runStartedAt = null
+    this.cumulativeSteps = 0
+    this.save()
   }
-
-  private async appendEvent(
-    projectPath: string | null,
-    event: Record<string, unknown>,
-  ): Promise<void> {
-    if (!projectPath) return
-    try {
-      const dir = path.join(projectPath, '.agent')
-      await fs.mkdir(dir, { recursive: true })
-      await fs.appendFile(path.join(dir, 'sessions.jsonl'), `${JSON.stringify(event)}\n`, 'utf8')
-    } catch {
-      /* السجل مساعد تشخيصي — لا يُسقط المهمة */
-    }
+  info(): SessionInfo {
+    return { id: this.id, projectId: this.projectId, title: this.title, updatedAt: this.updatedAt, running: this.running, mode: this.mode }
   }
-
-  /** يقرأ آخر جلسات المشروع لاستئناف العمل. */
-  async history(projectPath: string, limit = 20): Promise<Array<Record<string, unknown>>> {
-    try {
-      const file = path.join(projectPath, '.agent', 'sessions.jsonl')
-      const raw = await fs.readFile(file, 'utf8')
-      return raw
-        .trim()
-        .split('\n')
-        .filter(Boolean)
-        .slice(-limit)
-        .map((l) => JSON.parse(l) as Record<string, unknown>)
-    } catch {
-      return []
+  save() {
+    this.updatedAt = Date.now()
+    db().put('sessions', this.id, this.meta())
+  }
+  linkChild(): AbortController {
+    const c = new AbortController()
+    if (this.abort?.signal.aborted) c.abort()
+    else this.abort?.signal.addEventListener('abort', () => c.abort(), { once: true })
+    this.children.add(c)
+    return c
+  }
+  unlinkChild(c: AbortController) {
+    this.children.delete(c)
+  }
+  abortAll() {
+    for (const c of [...this.children]) {
+      try { c.abort() } catch {}
     }
+    this.children.clear()
+    this.abort?.abort()
   }
 }
 
+const live = new Map<string, Session>()
+const LIVE_CAP = 8
+
+function remember(s: Session) {
+  live.set(s.id, s)
+  if (live.size <= LIVE_CAP) return
+  for (const [id, x] of [...live].sort((a, b) => a[1].updatedAt - b[1].updatedAt)) {
+    if (id === s.id || x.running) continue
+    live.delete(id)
+    break
+  }
+}
+
+export function createSession(mode: SessionMode = 'studio'): Session {
+  const s = new Session(uid('ses_'), null, mode === 'agent' ? 'إيجنت الكمبيوتر' : 'محادثة جديدة')
+  s.mode = mode
+  remember(s)
+  s.save()
+  return s
+}
+
+export function getSession(id: string): Session | undefined {
+  const hit = live.get(id)
+  if (hit) return hit
+  const m = db().get<SessionMeta>('sessions', id)
+  if (!m) return undefined
+  const s = new Session(m.id, m.projectId, m.title, db().msgs<Msg>(id), m.plan ?? [], m.model ?? null, m.resumable, m.updatedAt, m.runStartedAt ?? null, m.cumulativeSteps ?? 0, m.mode ?? 'studio', normalizeMemory(m.memory))
+  remember(s)
+  return s
+}
+
+export function openOrCreate(mode: SessionMode = 'studio'): Session {
+  const all = listSessions()
+  const m =
+    mode === 'agent'
+      ? all.find((x) => x.mode === 'agent')
+      : all.find((x) => x.mode !== 'agent' && (x.projectId || x.title !== 'محادثة جديدة'))
+  if (m) {
+    const s = getSession(m.id)
+    if (s) return s
+  }
+  return createSession(mode)
+}
+
+export function pruneEmptySessions(keepRecent = 5): number {
+  const metas = db().all<SessionMeta>('sessions').sort((a, b) => b.updatedAt - a.updatedAt)
+  let removed = 0
+  for (const m of metas.slice(keepRecent)) {
+    if (m.projectId || (m.title !== 'محادثة جديدة' && m.title !== 'وكيل المتصفح') || live.has(m.id)) continue
+    db().msgDelete(m.id)
+    db().del('sessions', m.id)
+    removed++
+  }
+  return removed
+}
+
+export function deleteAllSessions(): number {
+  let removed = 0
+  for (const m of db().all<SessionMeta>('sessions')) {
+    const s = live.get(m.id)
+    if (s?.running) continue
+    db().msgDelete(m.id)
+    db().del('sessions', m.id)
+    if (s) live.delete(m.id)
+    removed++
+  }
+  return removed
+}
+
+export function deleteSessionsForProject(projectId: string): number {
+  let removed = 0
+  for (const m of db().all<SessionMeta>('sessions')) {
+    if (m.projectId !== projectId) continue
+    const s = live.get(m.id)
+    if (s?.running) continue
+    db().msgDelete(m.id)
+    db().del('sessions', m.id)
+    if (s) live.delete(m.id)
+    removed++
+  }
+  return removed
+}
+
+export const listSessions = (): SessionInfo[] =>
+  db().all<SessionMeta>('sessions').sort((a, b) => b.updatedAt - a.updatedAt).map((m) => ({ id: m.id, projectId: m.projectId, title: m.title, updatedAt: m.updatedAt, running: live.get(m.id)?.running ?? false, mode: m.mode ?? 'studio' }))
+
+export function latestSessionForProject(projectId: string): Session | undefined {
+  const m = db().all<SessionMeta>('sessions').filter((x) => x.projectId === projectId).sort((a, b) => b.updatedAt - a.updatedAt)[0]
+  return m ? getSession(m.id) : undefined
+}
+
+export const allLive = () => [...live.values()]
+
+export { toChatItems } from './chatItems'

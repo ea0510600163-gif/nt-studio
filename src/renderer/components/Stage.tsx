@@ -1,32 +1,33 @@
 import { FitAddon } from '@xterm/addon-fit'
 import { Terminal, type ITheme } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
-import { Activity, ArrowUpLeft, Check, ChevronLeft, ChevronRight, CircleCheck, Code2, Copy, ExternalLink, Eye, File as FileIcon, Folder, Globe, Info, Layers3, LoaderCircle, Monitor, RefreshCw, ScrollText, Smartphone, Sparkles, Square, Tablet, TerminalSquare, TriangleAlert, X } from 'lucide-react'
+import { Bot, Check, ChevronLeft, ChevronRight, CircleCheck, Code2, Copy, ExternalLink, Eye, File as FileIcon, Folder, Info, LoaderCircle, Monitor, RefreshCw, ScrollText, Smartphone, Square, Tablet, TerminalSquare, TriangleAlert, X } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
 import type { DeviceKind, FileNode, ProcInfo } from '@shared/types'
 import { type LogEntry, type Tab, useStore } from '@/lib/store'
 import { useTheme } from '@/lib/theme'
 import { CATS, toolMeta } from '@/lib/toolMeta'
+import AgentConsole from './computer/AgentConsole'
 
 type Hljs = typeof import('highlight.js/lib/common').default
 
 const ORDER: Tab[] = ['preview', 'code', 'terminal', 'log']
 const HL_MAX = 400 * 1024
 
-const TERM_DARK = '#0c0f16'
+const TERM_DARK = '#0f0f0f'
 const TERM_FALLBACK: ITheme = {
   background: TERM_DARK,
-  foreground: '#e9ebf2',
-  cursor: '#d9a45c',
-  selectionBackground: '#d9a45c55',
+  foreground: '#f0f0f0',
+  cursor: '#d6d6d6',
+  selectionBackground: '#6ea1f044',
   black: TERM_DARK,
-  red: '#ef8377',
-  green: '#58c7a2',
-  yellow: '#d9a45c',
-  blue: '#7aa7f0',
-  magenta: '#b9a5f2',
-  cyan: '#63c4d4',
-  white: '#e9ebf2'
+  red: '#e7828b',
+  green: '#8bd694',
+  yellow: '#f5a742',
+  blue: '#6ea1f0',
+  magenta: '#b19be0',
+  cyan: '#63bfc9',
+  white: '#f0f0f0'
 }
 
 function readTermTheme(): ITheme {
@@ -53,7 +54,7 @@ function readTermTheme(): ITheme {
 
 const LOG_TIME = new Intl.DateTimeFormat('ar-EG-u-nu-latn', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
 
-const escapeHtml = (s: string): string => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+const escapeHtml = (s: string): string => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e))
 
@@ -90,7 +91,7 @@ function ClosePreviewButton() {
   if (!preview.open) return null
   return (
     <button
-      className="icon-btn no-drag shrink-0 !size-8"
+      className="icon-btn no-drag shrink-0"
       onClick={() => void closePreview()}
       aria-label="إغلاق المعاينة"
       title="إغلاق المعاينة"
@@ -100,16 +101,80 @@ function ClosePreviewButton() {
   )
 }
 
-/* ───────────── المعاينة ───────────── */
+function PreviewToolbar() {
+  const preview = useStore((s) => s.preview)
+  const [devOpen, setDevOpen] = useState(false)
+  const devWrap = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!devOpen) return
+    const onDown = (e: PointerEvent) => { if (!devWrap.current?.contains(e.target as Node)) setDevOpen(false) }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setDevOpen(false) }
+    document.addEventListener('pointerdown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => { document.removeEventListener('pointerdown', onDown); document.removeEventListener('keydown', onKey) }
+  }, [devOpen])
+
+  const dev: { id: DeviceKind; icon: typeof Monitor; label: string }[] = [
+    { id: 'mobile', icon: Smartphone, label: 'جوال' },
+    { id: 'tablet', icon: Tablet, label: 'تابلت' },
+    { id: 'desktop', icon: Monitor, label: 'ديسكتوب' }
+  ]
+
+  return (
+    <div className="flex min-w-0 flex-1 items-center gap-1.5">
+      <div ref={devWrap} className="relative flex shrink-0 items-center gap-1.5">
+        <div className="flex items-center gap-1.5 @max-[560px]:hidden">
+          {dev.map((d) => (
+            <button key={d.id} className="icon-btn" data-active={preview.device === d.id} title={d.label} aria-label={d.label} onClick={() => void window.nt.preview.setDevice(d.id)}>
+              <d.icon size={16} />
+            </button>
+          ))}
+        </div>
+        <span className="@min-[561px]:hidden">
+          <button className="icon-btn" aria-haspopup="menu" aria-expanded={devOpen} aria-label="نوع الجهاز" title="نوع الجهاز" onClick={() => setDevOpen((o) => !o)}>
+            <Monitor size={16} />
+          </button>
+        </span>
+        {devOpen && (
+          <div role="menu" aria-label="نوع الجهاز" className="pop absolute start-0 top-full z-30 mt-1 min-w-[9rem] p-1">
+            {dev.map((d) => (
+              <button key={d.id} role="menuitemradio" aria-checked={preview.device === d.id} className="row-hover flex w-full items-center gap-2 px-2 py-1.5 text-start t-sm" onClick={() => { void window.nt.preview.setDevice(d.id); setDevOpen(false) }}>
+                <d.icon size={14} className="shrink-0" />
+                <span className="min-w-0 flex-1">{d.label}</span>
+                {preview.device === d.id && <CircleCheck size={13} className="shrink-0 text-brass-hi" />}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+      <button className="icon-btn shrink-0" title="إعادة التحميل" aria-label="إعادة التحميل" disabled={!preview.open} onClick={() => void window.nt.preview.reload()}>
+        <RefreshCw size={15} className={preview.loading ? 'spin' : ''} />
+      </button>
+      <div className="mono mx-1 flex h-[26px] min-w-0 flex-1 items-center gap-2 rounded-lg border border-hair bg-surface px-3 t-xs text-mute @max-[560px]:px-2">
+        {preview.loading && <LoaderCircle size={12} className="spin shrink-0 text-brass" />}
+        <span className="truncate @max-[560px]:hidden">{preview.url}</span>
+        <span className="truncate @min-[561px]:hidden">{compactUrl(preview.url) || preview.title}</span>
+      </div>
+      {preview.errors > 0 && (
+        <span className="badge shrink-0" data-tone="coral" title="أخطاء Console/شبكة في الصفحة" role="img" aria-label={`${preview.errors} أخطاء في الصفحة`}>
+          <TriangleAlert size={12} />
+          <span className="num">{preview.errors}</span>
+        </span>
+      )}
+      <button className="icon-btn shrink-0" title="فتح في المتصفح" aria-label="فتح في المتصفح" disabled={!preview.open} onClick={() => void window.nt.preview.external()}><ExternalLink size={15} /></button>
+      <ClosePreviewButton />
+    </div>
+  )
+}
+
 function PreviewPane({ active }: { active: boolean }) {
   const host = useRef<HTMLDivElement>(null)
   const preview = useStore((s) => s.preview)
   const tab = useStore((s) => s.tab)
   const mode = useStore((s) => s.mode)
   const overlay = useStore((s) => s.overlay)
-  const visible = active && tab === 'preview' && overlay === null
-  const [devOpen, setDevOpen] = useState(false)
-  const devWrap = useRef<HTMLDivElement>(null)
+  const visible = active && tab === 'preview' && overlay === null && mode !== 'agent'
 
   const sync = useCallback(() => {
     const el = host.current
@@ -130,96 +195,18 @@ function PreviewPane({ active }: { active: boolean }) {
     }
   }, [sync])
   useEffect(() => { void window.nt.preview.setSuppressed(!visible); if (visible) sync() }, [visible, sync])
+  useEffect(() => { sync() }, [preview.boundsEpoch, sync])
 
-  useEffect(() => {
-    if (!devOpen) return
-    const onDown = (e: PointerEvent) => { if (!devWrap.current?.contains(e.target as Node)) setDevOpen(false) }
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setDevOpen(false) }
-    document.addEventListener('pointerdown', onDown)
-    document.addEventListener('keydown', onKey)
-    return () => { document.removeEventListener('pointerdown', onDown); document.removeEventListener('keydown', onKey) }
-  }, [devOpen])
-
-  const dev: { id: DeviceKind; icon: typeof Monitor; label: string }[] = [
-    { id: 'mobile', icon: Smartphone, label: 'جوال' },
-    { id: 'tablet', icon: Tablet, label: 'تابلت' },
-    { id: 'desktop', icon: Monitor, label: 'ديسكتوب' }
-  ]
+  if (mode === 'agent') {
+    return <AgentConsole />
+  }
   return (
-    <div className="flex h-full flex-col @container">
-      <div className="preview-toolbar flex h-[var(--sp-10)] shrink-0 items-center gap-1.5 border-b border-hair px-3">
-        <div ref={devWrap} className="relative flex shrink-0 items-center gap-1.5">
-          <div className="flex items-center gap-1.5 @max-[560px]:hidden">
-            {dev.map((d) => (
-              <button key={d.id} className="icon-btn" data-active={preview.device === d.id} title={d.label} aria-label={d.label} onClick={() => void window.nt.preview.setDevice(d.id)}>
-                <d.icon size={16} />
-              </button>
-            ))}
-          </div>
-          <span className="@min-[561px]:hidden">
-            <button className="icon-btn" aria-haspopup="menu" aria-expanded={devOpen} aria-label="نوع الجهاز" title="نوع الجهاز" onClick={() => setDevOpen((o) => !o)}>
-              <Monitor size={16} />
-            </button>
-          </span>
-          {devOpen && (
-            <div role="menu" aria-label="نوع الجهاز" className="pop absolute start-0 top-full z-30 mt-1 min-w-[9rem] p-1">
-              {dev.map((d) => (
-                <button key={d.id} role="menuitemradio" aria-checked={preview.device === d.id} className="row-hover flex w-full items-center gap-2 px-2 py-1.5 text-start t-sm" onClick={() => { void window.nt.preview.setDevice(d.id); setDevOpen(false) }}>
-                  <d.icon size={14} className="shrink-0" />
-                  <span className="min-w-0 flex-1">{d.label}</span>
-                  {preview.device === d.id && <CircleCheck size={13} className="shrink-0 text-brass-hi" />}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-        <button className="icon-btn shrink-0" title="إعادة التحميل" aria-label="إعادة التحميل" disabled={!preview.open} onClick={() => void window.nt.preview.reload()}>
-          <RefreshCw size={15} className={preview.loading ? 'spin' : ''} />
-        </button>
-        <div className="mono mx-1 flex h-8 min-w-0 flex-1 items-center gap-2 rounded-lg border border-hair bg-surface px-3 t-xs text-mute @max-[560px]:px-2">
-          {preview.loading && <LoaderCircle size={12} className="spin shrink-0 text-brass" />}
-          <span className="truncate @max-[560px]:hidden">{preview.url || 'لا توجد معاينة'}</span>
-          <span className="truncate @min-[561px]:hidden">{compactUrl(preview.url) || preview.title || 'لا توجد معاينة'}</span>
-        </div>
-        {preview.errors > 0 && (
-          <span className="badge shrink-0" data-tone="coral" title="أخطاء Console/شبكة في الصفحة" role="img" aria-label={`${preview.errors} أخطاء في الصفحة`}>
-            <TriangleAlert size={12} />
-            <span className="num">{preview.errors}</span>
-          </span>
-        )}
-        <button className="icon-btn shrink-0" title="فتح في المتصفح" aria-label="فتح في المتصفح" disabled={!preview.open} onClick={() => void window.nt.preview.external()}><ExternalLink size={15} /></button>
-        <ClosePreviewButton />
-      </div>
-      <div ref={host} className={`relative min-h-0 flex-1 ${preview.open ? 'bg-bg' : 'stage-empty'}`}>
-        {!preview.open && mode === 'agent' && (
-          <div className="preview-welcome">
-            <div className="canvas-kicker"><span className="status-dot" />متصفح الوكيل</div>
-            <div className="preview-emblem"><Globe size={42} strokeWidth={1.1} /></div>
-            <span className="welcome-kicker">BROWSE. UPLOAD. PUBLISH.</span>
-            <h1>متصفحك الحي<br /><span>هنا يعمل الوكيل.</span></h1>
-            <p>اطلب من المحادثة فتح موقع أو انشر صورة.<br />تسجيل دخولك محفوظ — سجّلت مرة واحدة.</p>
-            <div className="canvas-footer"><Sparkles size={12} /><span>ابدأ من المحادثة. شاهد النشر هنا.</span><span className="mono">NT / AGENT</span></div>
-          </div>
-        )}
-        {!preview.open && mode !== 'agent' && (
-          <div className="preview-welcome">
-            <div className="canvas-kicker"><span className="status-dot" />مساحة الإبداع والتنفيذ</div>
-            <div className="preview-emblem"><Layers3 size={42} strokeWidth={1.1} /></div>
-            <span className="welcome-kicker">IDEA. BUILD. EXPERIENCE.</span>
-            <h1>هنا تصبح الأفكار<br /><span>شيئاً تراه.</span></h1>
-            <p>معاينة حية، كود واضح، وتنفيذ أمام عينيك.<br />كل أدوات البناء في مساحة واحدة.</p>
-            <div className="canvas-capabilities">
-              {[{ icon: Eye, name: 'معاينة حية', tab: 'preview' as const }, { icon: Code2, name: 'استكشف الكود', tab: 'code' as const }, { icon: TerminalSquare, name: 'راقب التنفيذ', tab: 'terminal' as const }].map(({ icon: Icon, name, tab: next }) => <button key={next} onClick={() => useStore.getState().setTab(next)}><Icon size={17} /><span>{name}</span><ArrowUpLeft size={12} /></button>)}
-            </div>
-            <div className="canvas-footer"><Sparkles size={12} /><span>ابدأ من المحادثة. شاهد النتيجة هنا.</span><span className="mono">NT / STUDIO</span></div>
-          </div>
-        )}
-      </div>
+    <div ref={host} className={`relative h-full ${preview.open ? 'bg-bg' : 'grid-bg'}`}>
+      {!preview.open && <span className="stage-empty-label">المعاينة</span>}
     </div>
   )
 }
 
-/* ───────────── الكود ───────────── */
 function findDefaultFile(nodes: FileNode[]): string {
   const flat: string[] = []
   const walk = (list: FileNode[]) => {
@@ -236,7 +223,7 @@ function findDefaultFile(nodes: FileNode[]): string {
   for (const p of preferred) {
     if (flat.includes(p)) return p
   }
-  return flat[0] ?? ''
+  return ''
 }
 
 function TreeView({
@@ -256,19 +243,20 @@ function TreeView({
   openDirs: Record<string, boolean>
   onToggleDir: (p: string) => void
 }) {
+  const sorted = [...nodes].sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }))
   return (
     <>
-      {nodes.map((n) => (
+      {sorted.map((n) => (
         <div key={n.path}>
           <button
             onClick={() => (n.dir ? onToggleDir(n.path) : onSel(n.path))}
             style={collapsed ? undefined : { paddingInlineStart: 8 + depth * 14 }}
             title={n.path}
-            className={`flex w-full items-center gap-1.5 rounded-md py-[3px] pe-2 text-start t-sm transition hover:bg-raised ${sel === n.path ? 'bg-raised text-brass-hi' : 'text-mute'} ${collapsed ? 'justify-center' : ''}`}
+            className={`flex w-full items-center gap-2 rounded-md py-1 pe-2 text-start t-sm transition hover:bg-raised hover:text-ink ${sel === n.path ? 'bg-raised text-ink' : n.dir ? 'text-ink' : 'text-mute'} ${collapsed ? 'justify-center' : ''}`}
           >
-            {n.dir ? <ChevronLeft size={12} className={`shrink-0 transition ${openDirs[n.path] ? '-rotate-90' : ''}`} /> : <span className="w-3 shrink-0" />}
-            {n.dir ? <Folder size={13} className="shrink-0 text-faint" /> : <FileIcon size={13} className="shrink-0 text-faint" />}
-            {!collapsed && <span className="mono truncate" style={{ unicodeBidi: 'plaintext' }}>{n.name}</span>}
+            {!collapsed && (n.dir ? <ChevronRight size={12} className={`shrink-0 text-faint transition ${openDirs[n.path] ? 'rotate-90' : ''}`} /> : <span className="w-3 shrink-0" />)}
+            {n.dir ? <Folder size={13} className="shrink-0 text-brass" /> : <FileIcon size={13} className="shrink-0 text-faint" />}
+            {!collapsed && <span className="mono min-w-0 truncate" style={{ unicodeBidi: 'plaintext' }}>{n.name}</span>}
           </button>
           {n.dir && openDirs[n.path] && n.children && (
             <TreeView nodes={n.children} depth={depth + 1} sel={sel} onSel={onSel} collapsed={collapsed} openDirs={openDirs} onToggleDir={onToggleDir} />
@@ -323,20 +311,18 @@ function CodePane() {
     setReq((r) => r + 1)
   }, [expandParents])
 
-  // مزامنة الملف المطلوب فتحه من بطاقات التنفيذ في المحادثة
   useEffect(() => {
     if (selectedFile) pick(selectedFile)
   }, [selectedFile, pick])
 
-  // إعادة ضبط عند تغيّر المشروع
   useEffect(() => {
     setSel('')
     setSrc('')
     loadedSelRef.current = ''
-  }, [project?.id])
+  }, [sessionId, project?.id])
 
   const load = useCallback(async () => {
-    if (!sessionId || !project) {
+    if (!sessionId) {
       setTree([])
       return
     }
@@ -354,13 +340,12 @@ function CodePane() {
       setTree([])
       setTreeErr(`تعذّر جلب شجرة ملفات المشروع: ${errText(e)}`)
     }
-  }, [sessionId, project, expandParents])
+  }, [sessionId, expandParents])
 
   useEffect(() => { void load() }, [load, treeRev])
 
-  // قراءة الملف: لا نُومض هيكل التحميل إلا عند تبديل الملف فعلاً؛ تحديثات treeRev تحدّث الكود في مكانه بهدوء
   useEffect(() => {
-    if (!sel || !sessionId || !project) {
+    if (!sel || !sessionId) {
       setLoading(false)
       return
     }
@@ -383,7 +368,7 @@ function CodePane() {
         }
       })
     return () => { alive = false }
-  }, [sel, sessionId, project, treeRev, req])
+  }, [sel, sessionId, treeRev, req])
 
   useEffect(() => {
     let alive = true
@@ -409,18 +394,17 @@ function CodePane() {
       await navigator.clipboard.writeText(src)
       setCopied(true)
       setTimeout(() => setCopied(false), 1500)
-    } catch { /* ignore */ }
+    } catch {}
   }
 
-  if (!project) return <Empty icon={Code2} text="لا يوجد مشروع بعد. ستظهر ملفاته هنا فور إنشائه." />
   return (
-    <div className="flex h-full @container">
-      <aside className={`shrink-0 overflow-auto border-e border-hair py-2 [scrollbar-gutter:stable] ${sideOpen ? 'w-52' : 'w-11'} @max-[520px]:w-11`}>
+    <div className="flex h-full flex-row-reverse @container">
+      <aside className={`shrink-0 overflow-auto border-s border-hair py-2 [scrollbar-gutter:stable] ${sideOpen ? 'w-52' : 'w-11'} @max-[520px]:w-11`}>
         <div className={`flex items-center gap-1.5 px-2 pb-2 ${sideOpen ? '' : 'justify-center'}`}>
           <button className="icon-btn" onClick={() => setSideOpen((v) => !v)} aria-expanded={sideOpen} aria-controls="stage-tree" title={sideOpen ? 'طيّ الشجرة' : 'توسيع الشجرة'} aria-label={sideOpen ? 'طيّ الشجرة' : 'توسيع الشجرة'}>
-            {sideOpen ? <ChevronRight size={15} /> : <ChevronLeft size={15} />}
+            {sideOpen ? <ChevronLeft size={15} /> : <ChevronRight size={15} />}
           </button>
-          {sideOpen && <span className="t-xs font-medium text-faint">ملفات المشروع</span>}
+          {sideOpen && <span className="t-xs font-medium text-faint">{project ? 'ملفات المشروع' : 'مساحة العمل'}</span>}
         </div>
         {treeErr && (
           <p className="toast m-2 t-xs" data-level="error">
@@ -428,8 +412,8 @@ function CodePane() {
             <span>{treeErr}</span>
           </p>
         )}
-        {!tree.length && !treeErr && <p className="px-3 py-2 t-xs text-faint">لا ملفات في المشروع.</p>}
-        <div id="stage-tree">
+        {!tree.length && !treeErr && <p className="px-3 py-2 t-xs text-faint">لا ملفات بعد.</p>}
+        <div id="stage-tree" className={sideOpen ? 'px-1' : ''}>
           <TreeView
             nodes={tree}
             depth={0}
@@ -494,7 +478,6 @@ function CodePane() {
   )
 }
 
-/* ───────────── الطرفية ───────────── */
 function TerminalPane({ onProcsChange }: { onProcsChange?: (runningCount: number) => void }) {
   const el = useRef<HTMLDivElement>(null)
   const term = useRef<Terminal | null>(null)
@@ -517,7 +500,7 @@ function TerminalPane({ onProcsChange }: { onProcsChange?: (runningCount: number
     term.current = t
     fit.current = f
     t.onData((d) => curRef.current && void window.nt.term.input(curRef.current, d))
-    const ro = new ResizeObserver(() => { try { f.fit() } catch { /* مخفي */ } })
+    const ro = new ResizeObserver(() => { try { f.fit() } catch {} })
     ro.observe(el.current!)
     const offData = window.nt.on<{ id: string; data: string }>('term:data', (m) => { if (m.id === curRef.current) t.write(m.data) })
     const applyList = (l: ProcInfo[]) => {
@@ -525,7 +508,6 @@ function TerminalPane({ onProcsChange }: { onProcsChange?: (runningCount: number
       onProcsChange?.(l.filter((p) => p.running).length)
       if (!l.length) return
       const currentProc = l.find((p) => p.id === curRef.current)
-      // إذا لم تكن العملية الحالية قيد التشغيل وظهرت عملية جديدة نشطة، انتقل إليها تلقائياً
       if (!currentProc || (!currentProc.running && l[l.length - 1].running)) {
         const latestRunning = [...l].reverse().find((p) => p.running)
         setCur((latestRunning ?? l[l.length - 1]).id)
@@ -549,7 +531,7 @@ function TerminalPane({ onProcsChange }: { onProcsChange?: (runningCount: number
     t.reset()
     void window.nt.term.replay(cur).then((b) => t.write(b))
   }, [cur])
-  useEffect(() => { if (tab === 'terminal') try { fit.current?.fit() } catch { /* */ } }, [tab])
+  useEffect(() => { if (tab === 'terminal') try { fit.current?.fit() } catch {} }, [tab])
 
   const active = procs.find((p) => p.id === cur)
   return (
@@ -593,7 +575,6 @@ function TerminalPane({ onProcsChange }: { onProcsChange?: (runningCount: number
   )
 }
 
-/* ───────────── سجل الوكيل ───────────── */
 type LogFilter = 'all' | 'tools' | 'notices' | 'errors'
 
 function LogPane() {
@@ -634,7 +615,10 @@ function LogPane() {
           </button>
         ))}
       </div>
-      <div ref={ref} className="min-h-0 flex-1 overflow-auto p-3 [scrollbar-gutter:stable]">
+      <div
+        ref={ref}
+        className="min-h-0 flex-1 overflow-auto p-3 [scrollbar-gutter:stable]"
+      >
         {filtered.length === 0 ? (
           <p className="py-8 text-center t-sm text-faint">لا توجد عناصر تطابق هذا التصنيف.</p>
         ) : (
@@ -681,14 +665,10 @@ function Empty({ icon: I, text }: { icon: typeof Eye; text: string }) {
 
 export default function Stage({ active = true }: { active?: boolean }) {
   const project = useStore((s) => s.project)
-  const running = useStore((s) => s.running)
-  const phase = useStore((s) => s.phase)
-  const plan = useStore((s) => s.plan)
-  const usage = useStore((s) => s.usage)
   const preview = useStore((s) => s.preview)
-  const phaseLabel = useStore((s) => s.phaseLabel)
   const tab = useStore((s) => s.tab)
   const setTab = useStore((s) => s.setTab)
+  const mode = useStore((s) => s.mode)
   const [runningProcs, setRunningProcs] = useState(0)
   const bar = useRef<HTMLDivElement>(null)
 
@@ -711,22 +691,16 @@ export default function Stage({ active = true }: { active?: boolean }) {
 
   return (
     <section className="stage-workspace">
-      <header className="stage-heading">
-        <div>
-          <span className="stage-eyebrow">WORKSPACE</span>
-          <h2>{project?.name || 'مساحة البناء'}</h2>
+      <header className="stage-heading @container">
+        <div className="min-w-0">
+          <span className="stage-eyebrow">{mode === 'agent' ? 'COMPUTER-USE AGENT' : 'WORKSPACE'}</span>
+          <h2>{mode === 'agent' ? 'إيجنت — تحكم كامل بالكمبيوتر' : project?.name || 'مساحة البناء'}</h2>
         </div>
-        <span className="stage-live">
-          <Activity size={13} />
-          {running ? 'الوكيل يعمل' : 'كل شيء في مكانه'}
-        </span>
-      </header>
-      <nav className="stage-navigation flex shrink-0 items-center border-b border-hair px-3 @container">
         <div ref={bar} role="tablist" aria-label="ألواح المسرح" onKeyDown={onTabKey} className="seg min-w-0 max-w-full overflow-x-auto">
           <button id="stage-tab-preview" role="tab" aria-selected={tab === 'preview'} aria-controls="stage-panel-preview" tabIndex={tab === 'preview' ? 0 : -1}
-            className="seg-item shrink-0" title="المعاينة" aria-label="المعاينة" onClick={() => setTab('preview')}>
-            <Eye size={14} />
-            <span className="@max-[420px]:hidden">المعاينة</span>
+            className="seg-item shrink-0" title={mode === 'agent' ? 'لوحة الإيجنت' : 'المعاينة'} aria-label={mode === 'agent' ? 'لوحة الإيجنت' : 'المعاينة'} onClick={() => setTab('preview')}>
+            {mode === 'agent' ? <Bot size={14} /> : <Eye size={14} />}
+            <span className="@max-[420px]:hidden">{mode === 'agent' ? 'الإيجنت' : 'المعاينة'}</span>
             {preview.errors > 0 && <span className="size-1.5 rounded-full bg-coral" />}
           </button>
           <button id="stage-tab-code" role="tab" aria-selected={tab === 'code'} aria-controls="stage-panel-code" tabIndex={tab === 'code' ? 0 : -1}
@@ -746,25 +720,14 @@ export default function Stage({ active = true }: { active?: boolean }) {
             <span className="@max-[420px]:hidden">سجل الوكيل</span>
           </button>
         </div>
-      </nav>
+        {tab === 'preview' && mode !== 'agent' && <PreviewToolbar />}
+      </header>
       <div className="stage-panel-area min-h-0 flex-1">
         <div id="stage-panel-preview" role="tabpanel" aria-labelledby="stage-tab-preview" tabIndex={0} className="h-full" hidden={tab !== 'preview'}><PreviewPane active={active} /></div>
         <div id="stage-panel-code" role="tabpanel" aria-labelledby="stage-tab-code" tabIndex={0} className="h-full" hidden={tab !== 'code'}><CodePane /></div>
         <div id="stage-panel-terminal" role="tabpanel" aria-labelledby="stage-tab-terminal" tabIndex={0} className="h-full" hidden={tab !== 'terminal'}><TerminalPane onProcsChange={setRunningProcs} /></div>
         <div id="stage-panel-log" role="tabpanel" aria-labelledby="stage-tab-log" tabIndex={0} className="h-full" hidden={tab !== 'log'}><LogPane /></div>
       </div>
-      <footer className="workspace-statusbar">
-        <span className={phase === 'retrying' ? 'retry-dot' : 'status-dot'} />
-        <span className={phase === 'retrying' ? 'retry-live' : ''}>{phaseLabel || (running ? 'جارٍ العمل على مشروعك' : 'جاهز للخطوة التالية')}</span>
-        <span className="statusbar-spacer" />
-        {usage && (
-          <span className="num">
-            خطوة {usage.step} · {(usage.tokens / 1000).toFixed(1)}k رمز
-          </span>
-        )}
-        {plan.length > 0 && <span className="num">{plan.filter((p) => p.status === 'done').length}/{plan.length} مهام</span>}
-        <span className="mono">LOCAL WORKSPACE</span>
-      </footer>
     </section>
   )
 }

@@ -1,15 +1,13 @@
-// أنواع مشتركة بين Main وPreload وRenderer
-
 export type ApiStyle = 'openai' | 'anthropic' | 'responses'
 
 export interface ModelInfo {
   id: string
-  tools: boolean // يدعم استدعاء الأدوات الأصلي
-  vision: boolean // يدعم الصور
-  contextWindow: number // بالـ tokens
-  apiStyle?: ApiStyle // مسار هذا النموذج (يتجاوز نمط المزوّد) — مثل OpenCode Go
-  /** أقصى إخراج للرد (tokens) — من models.dev؛ يولّد ميزانية كتابة واقعية */
+  tools: boolean
+  vision: boolean
+  contextWindow: number
+  apiStyle?: ApiStyle
   maxOutput?: number
+  origin?: 'catalog' | 'manual'
 }
 
 export interface ProviderPublic {
@@ -19,14 +17,14 @@ export interface ProviderPublic {
   apiStyle: ApiStyle
   models: ModelInfo[]
   hasKey: boolean
-  opencode?: boolean // مزوّد OpenCode: يرسل ترويسة x-opencode-session + User-Agent
+  opencode?: boolean
 }
 
 export interface ProviderInput {
   id?: string
   name: string
   baseUrl: string
-  apiKey?: string // اتركه فارغاً عند التعديل للإبقاء على المفتاح الحالي
+  apiKey?: string
   apiStyle: ApiStyle
   models: ModelInfo[]
   opencode?: boolean
@@ -37,17 +35,54 @@ export interface ModelRef {
   modelId: string
 }
 
+export type PermissionMode = 'ask' | 'full'
+
 export interface Settings {
   workspaceRoot: string
   maxSteps: number
   commandTimeoutSec: number
   maxOutputTokens: number
   compactAtPercent: number
-  approvalMode: boolean
+  maxRunMs: number
+  maxTotalStepsAcrossResumes: number
   defaultModel: ModelRef | null
   fallbackModel: ModelRef | null
-  /** توجيه حر من المستخدم يُلحق بذيل تعليمات النظام (شخصية/تخصص/أسلوب الوكيل) */
+  permissionMode: PermissionMode
+  approvalMode: boolean
   persona?: string
+  studioPrompt?: string
+  agentPrompt?: string
+}
+
+export interface ApprovalRequest {
+  requestId: string
+  sessionId: string
+  tool: string
+  target: string
+  reason: string
+  danger: boolean
+}
+
+export interface SkillInfo {
+  id: string
+  label: string
+  description: string
+  content: string
+  isDefault?: boolean
+}
+
+export interface PickedFile {
+  path: string
+  name: string
+  size: number
+  preview?: string
+  image?: ImageAttachment
+}
+
+export interface PickedFolder {
+  path: string
+  name: string
+  entries: string[]
 }
 
 export interface ProjectInfo {
@@ -67,11 +102,9 @@ export interface SessionInfo {
   title: string
   updatedAt: number
   running: boolean
-  /** وضع الجلسة: studio (برمجة) أو agent (تشغيل متصفح) — غائب = studio للتوافق */
   mode?: SessionMode
 }
 
-/** وضع الجلسة — يحدد الأدوات والموجّه والواجهة */
 export type SessionMode = 'studio' | 'agent'
 
 export type TodoStatus = 'pending' | 'doing' | 'done' | 'blocked'
@@ -81,9 +114,8 @@ export interface TodoItem {
   status: TodoStatus
 }
 
-export type Phase = 'idle' | 'thinking' | 'acting' | 'testing' | 'compacting' | 'waiting' | 'retrying'
+export type Phase = 'idle' | 'thinking' | 'acting' | 'testing' | 'compacting' | 'waiting' | 'retrying' | 'stopping'
 
-/** ديف ملف حقيقي من الأداة — يُعرض أخضر/أحمر كاملاً في الواجهة */
 export interface FileDiff {
   path: string
   kind: 'create' | 'modify' | 'append' | 'delete'
@@ -93,14 +125,13 @@ export interface FileDiff {
   removed: number
 }
 
-/** صورة مرفقة من المستخدم في رسالة (base64) */
 export interface ImageAttachment {
-  mediaType: string // image/png | image/jpeg | image/webp | image/gif
-  data: string // base64 بلا بادئة
+  mediaType: string
+  data: string
 }
 
 export type ChatItem =
-  | { kind: 'user'; id: string; text: string; images?: string[]; step?: number }
+  | { kind: 'user'; id: string; text: string; images?: string[]; at?: number; step?: number }
   | { kind: 'task'; id: string; text: string; status: 'start' | 'done'; step?: number }
   | { kind: 'assistant'; id: string; text: string; streaming?: boolean; task?: string; taskText?: string; step?: number }
   | { kind: 'thinking'; id: string; text: string; streaming?: boolean; task?: string; taskText?: string; step?: number }
@@ -113,27 +144,24 @@ export type ChatItem =
       output?: string
       ms?: number
       image?: string
-      /** مفتاح المهمة التي تنتمي إليها (t0/t1… أو __boot) */
       task?: string
       taskText?: string
-      /** ديف حقيقي من الأداة (حيّ فقط) */
       diff?: FileDiff
       step?: number
     }
   | { kind: 'notice'; id: string; level: 'info' | 'warn' | 'error'; text: string; task?: string; taskText?: string; step?: number }
   | { kind: 'ask'; id: string; question: string; options?: string[]; answered?: string; step?: number }
 
-/** كل حدث يصل من العملية الرئيسية يحمل __seq تصاعدياً؛ الواجهة تتجاهل المكرر/المتأخر */
 export type AgentEvent =
   | { t: 'status'; sessionId: string; phase: Phase; label?: string; __seq?: number }
   | { t: 'text_delta'; sessionId: string; text: string; __seq?: number }
   | { t: 'text_reset'; sessionId: string; __seq?: number }
-  /** بدأ النموذج دوراً جديداً: بطاقة تفكير حيّة تظهر فوراً (حتى قبل أوّل دلتا تفكير) */
   | { t: 'thinking_start'; sessionId: string; id: string; __seq?: number }
   | { t: 'thinking_delta'; sessionId: string; id: string; text: string; __seq?: number }
   | { t: 'thinking_reset'; sessionId: string; __seq?: number }
   | { t: 'assistant_done'; sessionId: string; __seq?: number }
   | { t: 'tool_start'; sessionId: string; callId: string; name: string; input: unknown; __seq?: number }
+  | { t: 'tool_progress'; sessionId: string; callId: string; output: string; __seq?: number }
   | {
       t: 'tool_end'
       sessionId: string
@@ -166,14 +194,80 @@ export interface PreviewState {
   device: DeviceKind
   open: boolean
   errors: number
-  /** جيل مستند الواجهة؛ يمنع قبول حدود قديمة بعد إعادة تحميل النافذة. */
   boundsEpoch: number
 }
 
-/**
- * حدود حاوية المعاينة كما تراها الواجهة، مقيسة من نافذة التطبيق نفسها.
- * `seq` يجعل الأحدث يفوز عند وصول تحديثات ResizeObserver بترتيب معكوس.
- */
+export type ComputerAgentStatus = 'idle' | 'thinking' | 'acting' | 'waiting' | 'paused' | 'takeover' | 'done' | 'error'
+
+export interface ComputerStats {
+  clicks: number
+  chars: number
+  screenshots: number
+  steps: number
+  elapsedMs: number
+}
+
+export interface ComputerPlanStep {
+  title: string
+  state: 'done' | 'active' | 'pending'
+}
+
+export interface ComputerActionTrace {
+  id: string
+  kind: string
+  x?: number
+  y?: number
+  nx?: number
+  ny?: number
+  startX?: number
+  startY?: number
+  startNx?: number
+  startNy?: number
+  text?: string
+  detail?: string
+  hitRole?: string
+  hitName?: string
+  ms?: number
+  ts: number
+  changedScreen?: boolean
+}
+
+export interface ComputerStuckState {
+  kind: string
+  x?: number
+  y?: number
+  repeats: number
+  since: number
+}
+
+export type ComputerControlAction =
+  | 'pause'
+  | 'resume'
+  | 'stop'
+  | 'takeover'
+  | 'return'
+  | 'minimize_studio'
+  | 'restore_studio'
+
+export interface ComputerState {
+  status: ComputerAgentStatus
+  thought: string
+  stats: ComputerStats
+  plan: ComputerPlanStep[]
+  lastAction: ComputerActionTrace | null
+  lastActions: ComputerActionTrace[]
+  cursor: { x: number; y: number; nx: number; ny: number }
+  screenWidth: number
+  screenHeight: number
+  logicalWidth: number
+  logicalHeight: number
+  activeWindowTitle: string
+  activeWindowProcess: string
+  studioMinimized: boolean
+  stuck: ComputerStuckState | null
+  errorMessage?: string
+}
+
 export interface Bounds {
   x: number
   y: number

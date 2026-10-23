@@ -62,8 +62,8 @@ export const webTools: Tool[] = [
   {
     name: 'web_search',
     parallel: true,
-    description: 'Search the web and return top results with title, URL, and snippet.',
-    schema: schema({ query: { type: 'string', description: 'Search query' } }, ['query']),
+    description: 'Search the public web and return ranked hits, each with title, URL and snippet. DuckDuckGo answers first and Bing is the fallback when a query returns nothing. A query built from distinctive keywords (entity + topic + version or year) matches more precisely than a full sentence, and every hit is a reference only — the page body itself arrives from web_fetch on that URL.',
+    schema: schema({ query: { type: 'string', description: 'Search query — distinctive keywords (entity + topic + version or year) match more precisely than a full sentence' } }, ['query']),
     async run(i, ctx) {
       const q = String(i.query)
       let hits: Hit[] = []
@@ -97,7 +97,6 @@ export const webTools: Tool[] = [
   },
   {
     name: 'web_open',
-    // تسلسلي عمداً: فتحان متزامنان يتسابقان على الصفحة نفسها
     description: 'Open any website or search words in the live preview browser (general web: Google, X, YouTube…). For local projects use preview_open (port/path) instead. Accepts a full URL, a bare domain (example.com), or plain search words in any language.',
     schema: schema({ target: { type: 'string', description: 'URL, bare domain, or search words (Arabic supported)' } }, ['target']),
     async run(i, ctx) {
@@ -123,7 +122,6 @@ export const webTools: Tool[] = [
   },
   {
     name: 'browser_nav',
-    // تسلسلي عمداً: تنقلان متزامنان يخلطان سجل الصفحات
     description: 'Go back or forward in the preview browser history (like browser back/forward buttons).',
     schema: schema({ dir: { type: 'string', enum: ['back', 'forward'], description: 'Navigation direction' } }, ['dir']),
     async run(i, ctx) {
@@ -142,7 +140,7 @@ export const webTools: Tool[] = [
       } catch (e) {
         return fail(`تعذّر التنقل: ${(e as Error).message}`)
       }
-      await preview.settle(ctx.signal, 1500) // تنقل تاريخي: رجوع/تقدم سريع عادة (الكاش الخلفي)
+      await preview.settle(ctx.signal, 1500)
       return ok(`الآن: ${preview.state.url} — «${preview.state.title || 'بلا عنوان'}»`)
     }
   }

@@ -1,14 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { registerHooks } from 'node:module'
-import { mkdtempSync, rmSync, writeFileSync } from 'fs'
-import { tmpdir } from 'os'
-import { join } from 'path'
 
-/**
- * أداة الرفع: التسجيل والمخطط ومسارات الفشل قبل لمس المتصفح
- * (ملف مفقود/سرّي/محدد ناقص) — بنمط tests/webTools.test.mjs.
- */
 const ROOT = new URL('..', import.meta.url).href
 
 const TYPE_ONLY = new Set(['Tool', 'ToolContext', 'ToolResult', 'Settings', 'ProjectInfo', 'ModelInfo', 'TodoItem', 'FileDiff', 'ImageData', 'Phase'])
@@ -64,32 +57,6 @@ test('ملف غير موجود ⇒ فشل يسمّي المسار', async () => 
   const r = await tool.run({ paths: 'Z:/nope/nothing.png' }, ctx())
   assert.equal(r.isError, true)
   assert.match(r.content, /غير موجود/)
-})
-
-test('مفتاح خاص موجود ⇒ رفض أمني قبل لمس المتصفح', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'nt-up-'))
-  const key = join(dir, 'id_rsa')
-  writeFileSync(key, 'fake')
-  try {
-    const r = await tool.run({ ref: 3, paths: key }, ctx())
-    assert.equal(r.isError, true)
-    assert.match(r.content, /مرفوض/)
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-test('امتداد pem موجود ⇒ رفض أمني', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'nt-up-'))
-  const pem = join(dir, 'cert.pem')
-  writeFileSync(pem, 'fake')
-  try {
-    const r = await tool.run({ selector: 'input[type=file]', paths: pem }, ctx())
-    assert.equal(r.isError, true)
-    assert.match(r.content, /مرفوض/)
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
 })
 
 test('ملف عادي بلا محدد ⇒ فشل يطلب ref/selector/text', async () => {

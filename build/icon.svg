@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1a2238"/>
+      <stop offset="1" stop-color="#0b0e15"/>
+    </linearGradient>
+    <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f3d68a"/>
+      <stop offset="0.55" stop-color="#d9a94f"/>
+      <stop offset="1" stop-color="#9a6f24"/>
+    </linearGradient>
+    <linearGradient id="goldV" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f6dc96"/>
+      <stop offset="1" stop-color="#c1913a"/>
+    </linearGradient>
+  </defs>
+  <rect x="32" y="32" width="960" height="960" rx="232" fill="url(#bg)" stroke="url(#gold)" stroke-width="14"/>
+  <!-- circuit traces -->
+  <g stroke="url(#gold)" stroke-width="10" opacity="0.55" fill="none" stroke-linecap="round">
+    <path d="M120 300 H300 V420"/>
+    <path d="M904 300 H724 V420"/>
+    <path d="M120 724 H300 V604"/>
+    <path d="M904 724 H724 V604"/>
+    <path d="M512 96 V220"/>
+    <path d="M512 928 V804"/>
+  </g>
+  <g fill="url(#goldV)">
+    <circle cx="120" cy="300" r="26"/>
+    <circle cx="904" cy="300" r="26"/>
+    <circle cx="120" cy="724" r="26"/>
+    <circle cx="904" cy="724" r="26"/>
+    <circle cx="512" cy="96" r="26"/>
+    <circle cx="512" cy="928" r="26"/>
+  </g>
+  <!-- chip -->
+  <rect x="292" y="292" width="440" height="440" rx="96" fill="#202944" stroke="url(#gold)" stroke-width="12"/>
+  <rect x="326" y="326" width="372" height="372" rx="70" fill="none" stroke="#f3d68a" stroke-width="4" opacity="0.35"/>
+  <!-- neural N -->
+  <g>
+    <path d="M392 632 V392 H432 L592 572 V392 H632 V632 H592 L432 452 V632 Z" fill="url(#goldV)"/>
+    <!-- neural nodes on the N -->
+    <circle cx="392" cy="392" r="20" fill="#57c7d4" stroke="#0b0e15" stroke-width="6"/>
+    <circle cx="632" cy="392" r="20" fill="#57c7d4" stroke="#0b0e15" stroke-width="6"/>
+    <circle cx="512" cy="512" r="24" fill="#f6dc96" stroke="#0b0e15" stroke-width="6"/>
+    <circle cx="392" cy="632" r="20" fill="#57c7d4" stroke="#0b0e15" stroke-width="6"/>
+    <circle cx="632" cy="632" r="20" fill="#57c7d4" stroke="#0b0e15" stroke-width="6"/>
+  </g>
+  <!-- links between nodes -->
+  <g stroke="#f3d68a" stroke-width="7" opacity="0.9">
+    <line x1="392" y1="392" x2="512" y2="512"/>
+    <line x1="632" y1="392" x2="512" y2="512"/>
+    <line x1="392" y1="632" x2="512" y2="512"/>
+    <line x1="632" y1="632" x2="512" y2="512"/>
+  </g>
+  <g fill="#57c7d4">
+    <circle cx="392" cy="392" r="11"/>
+    <circle cx="632" cy="392" r="11"/>
+    <circle cx="392" cy="632" r="11"/>
+    <circle cx="632" cy="632" r="11"/>
+  </g>
+  <circle cx="512" cy="512" r="13" fill="#0b0e15"/>
+  <circle cx="512" cy="512" r="7" fill="#57c7d4"/>
+</svg>

@@ -1,11 +1,12 @@
 import { create } from 'zustand'
 import type {
-  AgentEvent, ChatItem, ImageAttachment, LoadedSession, ModelRef, Phase, PreviewState, ProjectInfo, ProviderPublic, SessionInfo, SessionMode, Settings, TodoItem
+  AgentEvent, ChatItem, ComputerControlAction, ComputerState, LoadedSession, ModelRef, Phase, PreviewState, ProjectInfo, ProviderPublic, SessionInfo, SessionMode, Settings, SkillInfo, TodoItem
 } from '@shared/types'
 import { validateImages } from '@shared/images'
 
 export type Tab = 'preview' | 'code' | 'terminal' | 'log'
 export type Overlay = null | 'projects' | 'settings' | 'provider' | 'sessions'
+export type SettingsTab = 'providers' | 'prompts' | 'skills' | 'system'
 
 export interface LogEntry {
   id: number
@@ -24,6 +25,10 @@ interface State {
   ready: boolean
   providers: ProviderPublic[]
   settings: Settings | null
+  defaultPrompts: { studioPrompt: string; agentPrompt: string }
+  skills: SkillInfo[]
+  activeSkill: SkillInfo | null
+  settingsTab: SettingsTab
   projects: ProjectRow[]
   sessionId: string | null
   project: ProjectInfo | null
@@ -35,55 +40,44 @@ interface State {
   needsResume: boolean
   usage: { tokens: number; window: number; step: number } | null
   preview: PreviewState
+  computer: ComputerState
   tab: Tab
   overlay: Overlay
   log: LogEntry[]
   toast: { text: string; level: 'info' | 'warn' | 'error' } | null
-  /** يزيد مع كل تغيير على القرص؛ تعتمد عليه شجرة الكود بدل مستمع fs:changed منفصل */
   treeRev: number
-  /** الملف المختار للعرض في تبويب الكود */
   selectedFile: string | null
-  /** عرض عمود الشات بالبكسل — بلا تخزين؛ App يحفظ nt.chatW في localStorage ويغذّي هذه القيمة */
   chatW: number
-  /** كل الجلسات المحفوظة للقائمة الجديدة — تُحدَّث بـ refreshSessions() */
   sessions: SessionInfo[]
-  /** وضع الواجهة: studio (برمجة ومشاريع) أو agent (مشغّل المتصفح) */
   mode: SessionMode
-  /** آخر جلسة لكل وضع — التبديل بينهما فوري بلا فقدان سياق */
   studioSessionId: string | null
   agentSessionId: string | null
-  /** تبديل الوضع مع حفظ جلسة الوضع الحالي وفتح جلسة الوضع الآخر (تُنشأ كسولاً) */
   setMode(m: SessionMode): Promise<void>
-
-  /**
-   * يربط قنواتIPC once ويعيد دالة فصل. الفصل ضروري: React StrictMode يستدعي
-   * التأثير مرتين، وكل استدعاء بلا فصل يترك مشتركاً ثانياً فيظهر كل حدث مرتين.
-   */
   bind(): () => void
-  /** تهيئة البيانات (مرّة واحدة مهما تكرر النداء) */
   bootstrap(): Promise<void>
   refreshProviders(): Promise<void>
   refreshProjects(): Promise<void>
-  /** يحدّث قائمة الجلسات من window.nt.sessions.list() */
   refreshSessions(): Promise<void>
+  refreshSkills(): Promise<void>
+  saveSkill(input: { id: string; label: string; description: string; content: string }): Promise<SkillInfo>
+  removeSkill(id: string): Promise<void>
+  setActiveSkill(s: SkillInfo | null): void
+  openSettingsTab(tab: SettingsTab): void
   setSettings(p: Partial<Settings>): Promise<void>
   applyLoaded(l: LoadedSession): void
   newSession(): Promise<void>
-  /** جلسة جديدة مربوطة بمشروع محدّد (من درج المشاريع أو الشريط) */
   openNewChatFor(projectId: string): Promise<void>
   openProject(id: string): Promise<void>
-  /** تحميل جلسة محفوظة بالمعرّف ثم تطبيقها (الواجهة تغلق الدرج بنفسها) */
   loadSession(id: string): Promise<void>
+  deleteAllChats(): Promise<number>
   send(text: string, images?: { mediaType: string; data: string }[]): Promise<void>
+  regenerate(): Promise<void>
   stop(): Promise<void>
   resume(): Promise<void>
   answer(askId: string, value: string): Promise<void>
   setTab(t: Tab): void
-  /** يبدّل التبويب؛ ولـ«preview» يضمن أيضاً أن لوحة المعاينة مفتوحة (غلاف رقيق حول setTab) */
   focusTab(tab: Tab): void
-  /** يفتح ملفاً محدداً مباشرة في تبويب الكود */
   openFileInStage(path: string): void
-  /** يضبط عرض عمود الشات في الحالة (بلا تخزين — App يحفظ nt.chatW) */
   setChatWidth(w: number): void
   setOverlay(o: Overlay): void
   notify(text: string, level?: 'info' | 'warn' | 'error'): void
@@ -92,48 +86,24 @@ interface State {
   currentModel(): ModelRef | null
   newChatForProject: () => Promise<void>
   closePreview: () => Promise<void>
+  computerControl: (action: ComputerControlAction) => Promise<void>
 }
 
 let logId = 0
 const entry = (e: Omit<LogEntry, 'id' | 'ts'>): LogEntry => ({ id: ++logId, ts: Date.now(), ...e })
 const uid = () => Math.random().toString(36).slice(2, 9)
 let bootPromise: Promise<void> | null = null
-/** مؤقّت مسح التنبيه الحالي — يُلغى عند كل تنبيه جديد حتى لا يمسح تنبيهاً أحدث */
 let toastTimer: ReturnType<typeof setTimeout> | null = null
-/**
- * آخر رقم تسلسلي (__seq) مُطبَّق لكل جلسة — المفتاح هو sessionId.
- *
- * لماذا لكل جلسة وليس رقماً عاماً واحداً؟ __seq تصاعدي على مستوى التطبيق كله
- * (bus يزيده في كل حدث غير-دلتا). رقمٌ عامٌ واحد قد يعلو بحدثٍ من جلسة B،
- * فيسقط بهدوء حدثاً لاحقاً شرعياً من الجلسة A برقم أقلّ: ذلك ممكن بعد إعادة
- * إقلاع تُعيد فتح جلسات قديمة، أو بعد إعادة تحميل مدفوعة بـ fs:changed —
- * فتتجمّد الواجهة على حالة قديمة بلا أيّ خطأ ظاهر. حارسٌ مستقلّ لكل جلسة
- * يحلّها: يرفض تكرار/تأخّر حدث الجلسة نفسها فقط، ولا يعرف شيئاً عن غيرها.
- */
 const lastSeqBySession = new Map<string, number>()
-/**
- * قاعدة التسلسل — دالة نقية قابلة للاختبار: لا يُطبَّق حدثٌ يحمل رقم __seq إلا
- * إذا كان أكبر من آخر رقم طُبِّق لجلسته (أو حدثٌ بلا رقم ⇒ يُطبَّق دائماً).
- * lastSeqForSession = -Infinity (أو غير موجود) يعني «اقبل كل شيء» — تُبذر به
- * الجلسة عند applyLoaded مباشرةً.
- */
+
 export function shouldApply(e: Pick<AgentEvent, '__seq'>, lastSeqForSession: number | undefined): boolean {
-  if (typeof e.__seq !== 'number') return true // حدث بلا رقم تسلسلي: نطبّقه دائماً
+  if (typeof e.__seq !== 'number') return true
   return e.__seq > (lastSeqForSession ?? -Infinity)
 }
-/**
- * المهمة الحالية: مفتاحها ونصّها. تُشتق من حدث الخطة (البند «doing»)،
- * وكل عنصر جديد يُوسَم بها — فتصير المجموعات في الشات = مهام لا خطوات.
- */
+
 let curTask: string | undefined
 let curTaskText = ''
 
-/**
- * إنهاء كل بطاقة تفكير منسيابة: الفارغة تُحذف (فوضى صفرية) وما بقي يتوقف عن
- * الانسياب ويبقى مطويّاً. مسحٌ لكل المصفوفة لا للأخير فقط: محاولة فاشلت أو
- * نموذج احتياطي قد يترك بطاقة حيّة في الوسط بعد دفع إشعار — و«الأخير» وحدها
- * كانت تبقى منسيابة إلى الأبد (هالة تنبض وعدّاد يركض في منتصف سجل انتهى).
- */
 function finalizeThinking(items: ChatItem[]): ChatItem[] {
   let hit = false
   const out: ChatItem[] = []
@@ -145,13 +115,17 @@ function finalizeThinking(items: ChatItem[]): ChatItem[] {
     }
     out.push(it)
   }
-  return hit ? out : items // مرجعٌ مماثل ⇒ لا إعادة رسم بلا داعٍ
+  return hit ? out : items
 }
 
 export const useStore = create<State>((set, get) => ({
   ready: false,
   providers: [],
   settings: null,
+  defaultPrompts: { studioPrompt: '', agentPrompt: '' },
+  skills: [],
+  activeSkill: null,
+  settingsTab: 'providers',
   projects: [],
   sessionId: null,
   project: null,
@@ -163,6 +137,23 @@ export const useStore = create<State>((set, get) => ({
   needsResume: false,
   usage: null,
   preview: { url: '', title: '', loading: false, device: 'desktop', open: false, errors: 0, boundsEpoch: 0 },
+  computer: {
+    status: 'idle',
+    thought: '',
+    stats: { clicks: 0, chars: 0, screenshots: 0, steps: 0, elapsedMs: 0 },
+    plan: [],
+    lastAction: null,
+    lastActions: [],
+    cursor: { x: 512, y: 384, nx: 0.5, ny: 0.5 },
+    screenWidth: 1920,
+    screenHeight: 1080,
+    logicalWidth: 1280,
+    logicalHeight: 720,
+    activeWindowTitle: '',
+    activeWindowProcess: '',
+    studioMinimized: false,
+    stuck: null
+  },
   tab: 'preview',
   overlay: null,
   log: [],
@@ -180,12 +171,19 @@ export const useStore = create<State>((set, get) => ({
     const offs = [
       nt.on<AgentEvent>('agent:event', (e) => get().handle(e)),
       nt.on<PreviewState>('preview:state', (p) => set({ preview: p })),
+      nt.on<ComputerState>('computer:state', (c) =>
+        set((prev) => ({
+          computer: {
+            ...prev.computer,
+            ...c
+          }
+        }))
+      ),
       nt.on<string>('ui:focus', (t) => { if (t === 'preview') set({ tab: 'preview' }) }),
       nt.on('providers:changed', () => void get().refreshProviders()),
+      nt.on('skills:changed', () => void get().refreshSkills()),
       nt.on('fs:changed', () => get().bumpTreeRev())
     ]
-    // لا توجد قناة sessions:changed؛ التركيب/إعادة التركيب هو نقطة التحديث
-    // للتزامن مع أي إنشاء/حذف خارجي للجلسات.
     void get().refreshSessions().catch(() => get().notify('تعذّر تحميل سجل المحادثات', 'error'))
     let off = false
     return () => {
@@ -199,12 +197,19 @@ export const useStore = create<State>((set, get) => ({
     if (bootPromise) return bootPromise
     bootPromise = (async () => {
       const nt = window.nt
-      const [providers, settings] = await Promise.all([nt.providers.list(), nt.settings.get()])
-      set({ providers, settings })
+      const [providers, settings, defaultPrompts, skills] = await Promise.all([
+        nt.providers.list(),
+        nt.settings.get(),
+        nt.settings.defaults().catch(() => ({ studioPrompt: '', agentPrompt: '' })),
+        nt.skills.list().catch(() => [])
+      ])
+      set({ providers, settings, defaultPrompts, skills })
       set({ preview: await nt.preview.state() })
+      if (nt.computer) {
+        try { set({ computer: await nt.computer.state() }) } catch {}
+      }
       await get().refreshProjects()
       await get().refreshSessions()
-      // استئناف آخر جلسة لها محتوى بدل إنشاء جلسة يتيمة عند كل إقلاع
       const l = await nt.sessions.openLatest()
       get().applyLoaded(l)
       set({ ready: true })
@@ -222,17 +227,38 @@ export const useStore = create<State>((set, get) => ({
   async refreshSessions() {
     set({ sessions: await window.nt.sessions.list() })
   },
+  async refreshSkills() {
+    const skills = await window.nt.skills.list()
+    const cur = get().activeSkill
+    set({
+      skills,
+      activeSkill: cur ? skills.find((s) => s.id === cur.id) ?? null : null
+    })
+  },
+  async saveSkill(input) {
+    const saved = await window.nt.skills.save(input)
+    await get().refreshSkills()
+    return saved
+  },
+  async removeSkill(id) {
+    await window.nt.skills.remove(id)
+    await get().refreshSkills()
+  },
+  setActiveSkill(s) {
+    set({ activeSkill: s })
+  },
+  openSettingsTab(tab) {
+    set({ settingsTab: tab, overlay: 'settings' })
+  },
   async setSettings(p) {
     set({ settings: await window.nt.settings.set(p) })
   },
 
   applyLoaded(l) {
-    curTask = undefined // عناصر إعادة التحميل تحمل مهامها من session.toChatItems
-    curTaskText = ''
-    // ابدأ حراسة التسلسل من جديد لهذه الجلسة: -Infinity يقبل كل أحداثها، فلا
-    // يُسقط أوّل حدث (تبديل جلسة/إعادة تحميل بعد رقم __seq أعلى من جلسة أخرى)
+    const doingIdx = (l.plan ?? []).findIndex((x) => x.status === 'doing')
+    curTask = doingIdx >= 0 ? `t${doingIdx}` : undefined
+    curTaskText = doingIdx >= 0 ? l.plan[doingIdx].text : ''
     lastSeqBySession.set(l.session.id, -Infinity)
-    // سجّل الجلسة في خانة وضعها (studio/agent) — التبديل بين الوضعين يسترجعها فوراً
     const slot = l.session.mode === 'agent' ? { agentSessionId: l.session.id } : { studioSessionId: l.session.id }
     set({
       sessionId: l.session.id,
@@ -252,14 +278,12 @@ export const useStore = create<State>((set, get) => ({
 
   async setMode(m) {
     if (get().mode === m) return
-    // التبديل أثناء عمل جارٍ يتركه يتيماً يستهلك الميزانية — أوقفه أولاً
     if (get().running) {
       get().notify('أوقف العمل الجاري أولاً ثم بدّل الوضع', 'warn')
       return
     }
     const from = get().mode
     const curId = get().sessionId
-    // احفظ جلسة الوضع المغادَر في خانتها قبل المغادرة
     set({ mode: m, ...(from === 'agent' ? { agentSessionId: curId } : { studioSessionId: curId }) })
     const slotId = m === 'agent' ? get().agentSessionId : get().studioSessionId
     let l: LoadedSession | null = null
@@ -267,7 +291,7 @@ export const useStore = create<State>((set, get) => ({
       try {
         l = await window.nt.sessions.load(slotId)
       } catch {
-        l = null // حُذفت من مصدر آخر — تُفتح من جديد أدناه
+        l = null
       }
     }
     get().applyLoaded(l ?? (await window.nt.sessions.openLatest(m)))
@@ -279,15 +303,25 @@ export const useStore = create<State>((set, get) => ({
     set({ overlay: null })
   },
   async openProject(id) {
-    const l = await window.nt.projects.open(id)
+    const l = await window.nt.projects.open(id, get().sessionId)
     get().applyLoaded(l)
     set({ overlay: null })
   },
   async loadSession(id) {
+    if (get().running) {
+      get().notify('أوقف العمل الجاري أولاً ثم بدّل الجلسة', 'warn')
+      return
+    }
     const l = await window.nt.sessions.load(id)
     get().applyLoaded(l)
-    // مزامنة الوضع مع الجلسة المحمّلة (درج الجلسات يعرض كل الأوضاع)
     if ((l.session.mode ?? 'studio') !== get().mode) set({ mode: l.session.mode ?? 'studio' })
+  },
+
+  async deleteAllChats() {
+    const removed = await window.nt.sessions.deleteAll()
+    await get().refreshSessions()
+    if (removed > 0 && !get().sessions.some((s) => s.id === get().sessionId)) await get().newSession()
+    return removed
   },
 
   currentModel() {
@@ -305,7 +339,6 @@ export const useStore = create<State>((set, get) => ({
       get().notify('افتح مشروعاً أولاً', 'warn')
       return
     }
-    // جلسة جديدة مربوطة بنفس المشروع: ذاكرة المشروع كاملة بسياق محادثة نظيف
     await get().openNewChatFor(project.id)
     get().notify('شات جديد على نفس المشروع', 'info')
   },
@@ -313,6 +346,27 @@ export const useStore = create<State>((set, get) => ({
   async closePreview() {
     await window.nt.preview.close()
     set({ preview: { ...get().preview, open: false } })
+  },
+
+  async computerControl(action) {
+    try {
+      const next = await window.nt.computer.control(action, get().sessionId ?? undefined)
+      set({ computer: next })
+      if (action === 'takeover') {
+        get().notify('✋ تعامل مع الجهاز بنفسك — الماوس والكيبورد بين يديك', 'info')
+      } else if (action === 'return') {
+        get().notify('🤖 أُعيد التحكم للإيجنت — يقيّم الشاشة الآن ويكمل المهمة', 'info')
+      } else if (action === 'pause') {
+        get().notify('⏸ أُوقف الإيجنت مؤقتاً', 'info')
+      } else if (action === 'resume') {
+        get().notify('▶ استؤنف عمل الإيجنت', 'info')
+      } else if (action === 'stop') {
+        set({ running: false, phase: 'idle', phaseLabel: '' })
+        get().notify('⏹ أُوقف الإيجنت فوراً', 'warn')
+      }
+    } catch (e) {
+      get().notify(`تعذّر تنفيذ الأمر: ${e instanceof Error ? e.message : String(e)}`, 'error')
+    }
   },
 
   async send(text, images) {
@@ -325,25 +379,52 @@ export const useStore = create<State>((set, get) => ({
     }
     if (!text.trim() && !safe.ok.length) return
     set((s) => ({
-      items: [...s.items, { kind: 'user', id: uid(), text: text.trim(), images: safe.ok.map((im) => `data:${im.mediaType};base64,${im.data}`) }],
+      items: [...s.items, { kind: 'user', id: uid(), text: text.trim(), images: safe.ok.map((im) => `data:${im.mediaType};base64,${im.data}`), at: Date.now() }],
       running: true,
       needsResume: false
     }))
     try {
       await window.nt.agent.send(sessionId, text.trim(), get().currentModel() ?? undefined, safe.ok.length ? safe.ok : undefined)
     } catch (e) {
-      // رفض الطلب (استثناء في الخلفية) لا يترك الواجهة «تعمل» بلا دورة
       set({ running: false, phase: 'idle', phaseLabel: '' })
       get().notify(`تعذّر بدء العمل: ${(e as Error).message}`, 'error')
       return
     }
     if (!running) set({ phase: 'thinking' })
   },
+  async regenerate() {
+    const { sessionId, items, mode } = get()
+    if (!sessionId) return
+    if (mode === 'agent') {
+      get().notify('إعادة التوليد متاحة في وضع Studio فقط', 'warn')
+      return
+    }
+    if (get().running) {
+      get().notify('أوقف العمل الجاري أولاً', 'warn')
+      return
+    }
+    let idx = -1
+    for (let k = items.length - 1; k >= 0; k--) if (items[k].kind === 'user') { idx = k; break }
+    if (idx < 0) {
+      get().notify('لا يوجد طلب سابق لإعادة توليده', 'warn')
+      return
+    }
+    set({ items: items.slice(0, idx + 1), running: true, needsResume: false, phase: 'thinking' })
+    try {
+      await window.nt.agent.regenerate(sessionId, get().currentModel() ?? undefined)
+    } catch (e) {
+      set({ running: false, phase: 'idle', phaseLabel: '' })
+      get().notify(`تعذّرت إعادة التوليد: ${(e as Error).message}`, 'error')
+    }
+  },
   async stop() {
-    const id = get().sessionId
-    if (!id) return
-    try { await window.nt.agent.stop(id) }
+    const st = get()
+    const target = st.sessions.find((x) => x.running)?.id ?? st.sessionId
+    if (!target) return
+    set({ phase: 'stopping', phaseLabel: 'جارٍ إيقاف الوكيل…' })
+    try { await window.nt.agent.stop(target) }
     catch (e) { get().notify(`تعذّر إيقاف العمل: ${e instanceof Error ? e.message : String(e)}`, 'error') }
+    void get().refreshSessions().catch(() => {})
   },
   async resume() {
     const id = get().sessionId
@@ -369,7 +450,6 @@ export const useStore = create<State>((set, get) => ({
 
   setTab: (tab) => set({ tab }),
   focusTab(tab) {
-    // غلاف رقيق حول setTab: للتبويب «preview» يضمن أيضاً أن لوحة المعاينة مفتوحة
     get().setTab(tab)
     if (tab === 'preview') set((s) => ({ preview: { ...s.preview, open: true } }))
   },
@@ -380,9 +460,6 @@ export const useStore = create<State>((set, get) => ({
   setOverlay: (overlay) => set({ overlay }),
   bumpTreeRev: () => set((s) => ({ treeRev: s.treeRev + 1 })),
   notify(text, level = 'info') {
-    // أوقف مؤقّت التنبيه السابق دائماً: تكرارٌ مطابقٌ خلال 1200ms مثلاً يعني
-    // استبدالاً + إعادة تشغيل (لا تكديس مؤقّتات)، وتنبيهٌ سريعٌ تالٍ لا يجوز
-    // أن يمسحه مؤقّت التنبيه الأوّل. مدّة الحياة تبقى 4500ms من كل ظهور.
     if (toastTimer) { clearTimeout(toastTimer); toastTimer = null }
     set({ toast: { text, level } })
     toastTimer = setTimeout(() => {
@@ -393,8 +470,6 @@ export const useStore = create<State>((set, get) => ({
 
   handle(e) {
     if (e.sessionId !== get().sessionId) return
-    // حماية تسلسلية لكل جلسة: ارفض حدثاً برقم __seq لا يتجاوز آخر رقم طُبِّق
-    // لهذه الجلسة تحديداً — لا رقم عامّ واحد يربط الجلسات (انظر lastSeqBySession)
     const last = lastSeqBySession.get(e.sessionId)
     if (!shouldApply(e, last)) return
     if (typeof e.__seq === 'number') lastSeqBySession.set(e.sessionId, e.__seq)
@@ -411,15 +486,12 @@ export const useStore = create<State>((set, get) => ({
         })
         break
       case 'thinking_start':
-        // تفريغ أي بطاقة سابقة أولاً (مسار احتياط/فشل لم يُفرّغها) ثم إضافة الجديدة
         set((s) => ({ items: [...finalizeThinking(s.items), { kind: 'thinking', id: e.id, text: '', streaming: true, task: curTask, taskText: curTaskText }] }))
         break
       case 'thinking_delta':
         set((s) => {
-          // التوجيه بالمعرّف لا بـ«العنصر الأخير»: مزوّد يخلط التفكير بالنص قد يرسل
-          // الدلتا بعد بدء النص، والمعرّف يضمن وصولها لبطاقتها الصحيحة.
           const idx = s.items.findIndex((i) => i.kind === 'thinking' && i.streaming && i.id === e.id)
-          if (idx < 0) return {} // بطاقة أُنهيت/حُذفت: لا مصدر للدلتا
+          if (idx < 0) return {}
           const items = [...s.items]
           const cur = items[idx] as Extract<ChatItem, { kind: 'thinking' }>
           items[idx] = { ...cur, text: cur.text + e.text }
@@ -427,7 +499,6 @@ export const useStore = create<State>((set, get) => ({
         })
         break
       case 'thinking_reset':
-        // إزالة كل بطاقة منسيابة — لا يشترط أن تكون الأخيرة (مسار الاحتياط يدفع إشعاراً قبلها)
         set((s) => (s.items.some((i) => i.kind === 'thinking' && i.streaming) ? { items: s.items.filter((i) => !(i.kind === 'thinking' && i.streaming)) } : {}))
         break
       case 'text_reset':
@@ -446,11 +517,15 @@ export const useStore = create<State>((set, get) => ({
         break
       case 'tool_start':
         set((s) => {
-          // id هو callId نفسه: تحديث هذا المعرّف لا ينشئ بطاقة ثانية أبداً
           if (s.items.some((i) => i.id === e.callId)) return { phase: 'acting' }
           const items = finalizeThinking(s.items)
           return { items: [...items, { kind: 'tool', id: e.callId, name: e.name, input: e.input, status: 'running', task: curTask, taskText: curTaskText }], phase: 'acting' }
         })
+        break
+      case 'tool_progress':
+        set((s) => ({
+          items: s.items.map((i) => (i.kind === 'tool' && i.id === e.callId ? { ...i, output: e.output } : i))
+        }))
         break
       case 'tool_end':
         set((s) => {
@@ -471,7 +546,6 @@ export const useStore = create<State>((set, get) => ({
         set((s) => ({ items: [...s.items, { kind: 'ask', id: e.askId, question: e.question, options: e.options }] }))
         break
       case 'plan': {
-        // انتقال المهمة: أغلق القديمة بإشعار «تمّ» وابدأ الجديدة بـ«بدأ» — يرى المستخدم الحد صراحة
         const doingIdx = e.items.findIndex((x) => x.status === 'doing')
         const nextKey = doingIdx >= 0 ? `t${doingIdx}` : curTask
         const nextText = doingIdx >= 0 ? e.items[doingIdx].text : curTaskText
@@ -500,6 +574,7 @@ export const useStore = create<State>((set, get) => ({
           return { items, running: false, phase: 'idle', phaseLabel: '', needsResume: e.reason === 'error' || e.reason === 'max_steps' }
         })
         void get().refreshProjects()
+        void get().refreshSessions().catch(() => {})
         break
     }
   }

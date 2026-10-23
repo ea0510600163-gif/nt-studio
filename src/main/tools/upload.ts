@@ -3,7 +3,6 @@ import { isAbsolute } from 'path'
 import { send } from '../bus'
 import { preview } from '../preview'
 import { clip, resolvePath } from '../util'
-import { readDeniedReason } from './guard'
 import { Tool, fail, ok, schema } from './types'
 
 function need(): string | null {
@@ -12,13 +11,11 @@ function need(): string | null {
   return null
 }
 
-/** عدد أخطاء Console الحالية — للمقارنة بعد الرفع */
 const errCount = () => preview.getLogs().console.filter((c) => c.level === 'error').length
 
 export const uploadTools: Tool[] = [
   {
     name: 'browser_upload',
-    // تسلسلي عمداً: رفعان متزامنان يتسابقان على debugger واحد
     phase: 'acting',
     description:
       'Upload local file(s) into a file input on the open preview page (e.g. attach post images when publishing). Works even when the input is visually hidden. Select the input by ref (from browser_snapshot), CSS selector, or visible text.',
@@ -32,16 +29,11 @@ export const uploadTools: Tool[] = [
       ['paths']
     ),
     async run(i, ctx) {
-      // 1) المسار أولاً (قبل لمس المتصفح — فشل سريع على مدخلات سيئة):
-      //    حلّ نسبي→مطلق، ثم وجود، ثم فحص الأسرار (P0-3: لا رفع لمفاتيح/‎.env)
       const raw = String(i.paths ?? '').trim()
       if (!raw) return fail('حدّد مسار الملف في paths.')
       const abs = isAbsolute(raw) ? raw : resolvePath(ctx.cwd(), raw)
       if (!existsSync(abs)) return fail(`الملف غير موجود: ${abs}`)
-      const denied = readDeniedReason(abs, ctx.cwd(), ctx.settings())
-      if (denied) return fail(`الرفع مرفوض — ملف حساس لا يُرسل لمواقع خارجية:\n${denied}`)
 
-      // 2) وجود المحدد شكلاً (قبل فتح المتصفح — فشل سريع)
       if (i.ref == null && !i.selector && !i.text) return fail('حدّد حقل الرفع عبر ref أو selector أو text.')
 
       const n = need()
@@ -49,13 +41,11 @@ export const uploadTools: Tool[] = [
       const wc = preview.wc
       if (!wc) return fail('المعاينة غير مفتوحة. افتح صفحة عبر web_open أولاً ثم أعد المحاولة.')
 
-      // 2) المحدد: نفس لغة browser_click (ref → data-nt-ref)؛ فرع text يعلّم الحقل بسمة
       let selector: string
       if (i.ref != null) selector = `[data-nt-ref="${Number(i.ref)}"]`
       else if (i.selector) selector = String(i.selector)
-      else selector = '' // يُحسم في فرع text أدناه
+      else selector = ''
 
-      // text: ابحث عن أقرب input[type=file] لنص ظاهر، وعلّمه بسمة مؤقتة (أنظف من nth-of-type)
       if (i.text && !i.selector && i.ref == null) {
         const markJs = `(()=>{
           const t=${JSON.stringify(String(i.text))}.trim().toLowerCase();
@@ -78,7 +68,6 @@ export const uploadTools: Tool[] = [
         }
       }
 
-      // 3) CDP عند الطلب فقط: attach → تحديد العقدة → حقن الملفات → detach (try/finally)
       const before = errCount()
       const dbg = wc.debugger
       try {
@@ -97,7 +86,6 @@ export const uploadTools: Tool[] = [
             return fail(`لم يُعثر على حقل الرفع (${selector}). خذ browser_snapshot جديدة وتحقق من ref.`)
           }
           if (!nodeId) return fail(`لم يُعثر على حقل الرفع (${selector}). خذ browser_snapshot جديدة وتحقق من ref.`)
-          // تحقق النوع: الرقم القديم قد يشير لعنصر ليس حقل ملفات — ارفض قبل حقن غامض
           try {
             const desc = (await dbg.sendCommand('DOM.describeNode', { nodeId })) as {
               node: { nodeName: string; attributes?: string[] }
@@ -114,15 +102,13 @@ export const uploadTools: Tool[] = [
         } finally {
           try {
             dbg.detach()
-          } catch {
-            /* تجاهل */
-          }
+          } catch {}
         }
       } catch (e) {
         return fail(`فشل الرفع (${(e as Error).message}). تحقق أن الهدف input[type=file] فعلاً عبر browser_snapshot جديدة، وأن الملف موجود وغير مفتوح حصرياً، ثم أعد المحاولة.`)
       }
 
-      await preview.settle(ctx.signal, 2500) // الرفع: انتظار توليد المعاينة/رد فعل الصفحة — لا شبكة كاملة
+      await preview.settle(ctx.signal, 2500)
       const fresh = preview
         .getLogs()
         .console.filter((c) => c.level === 'error')

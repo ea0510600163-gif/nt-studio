@@ -1,28 +1,10 @@
 import { session } from 'electron'
 import { log } from '../logger'
 
-/**
- * تثبيت تسجيل الدخول في المعاينة («سجّل مرة واحدة»).
- *
- * الفكرة من agent-app (`keepLogins`): كوكيز الجلسة (بلا تاريخ انتهاء — وأكثر
- * مواقع التواصل أساس دخولها كذلك) تموت عند إغلاق التطبيق، فنحوّلها عند كل
- * تغيّر إلى كوكيز دائمة تنتهي بعد سنة، مع تفريغ دوري لمخزن الكوكيز وتنظيف
- * وسم Electron من الـ UA حتى لا تميّزنا حواجز الكشف.
- *
- * ضمانات عدم الكسر:
- * - حارس إعادة الدخول: الكوكي المحوّلة تصل بشكل `session=false` فلا تُعاد
- *   معالجتها (مكافئ لحارس `!c.session` الأصلي) — لا حلقة لا نهائية.
- * - idempotency على مستوى الجلسة: إعادة `ensureView()` بعد انهيار عملية العرض
- *   لا تضاعف المستمعات/المؤقتات.
- * - كل الدوال fail-safe: أي عطل هنا لا يكسر فتح المعاينة أبداً.
- */
-
 export const LOGIN_PARTITION = 'persist:nt-preview'
-/** سنة كاملة بالثواني — مدة تثبيت الكوكيز */
 export const LOGIN_KEEP_SEC = 31536000
 const FLUSH_MS = 15000
 
-/** الحد الأدنى من حقول الكوكي الذي نحتاجه — قابل للاختبار بلا Electron */
 export interface HardenableCookie {
   name: string
   value: string
@@ -36,14 +18,12 @@ export interface HardenableCookie {
   expirationDate?: number
 }
 
-/** هل تحتاج هذه الكوكي إلى تثبيت؟ (منطق نقي) */
 export function shouldHardenCookie(c: HardenableCookie, removed: boolean): boolean {
   if (removed) return false
-  if (c.expirationDate && !c.session) return false // دائمة أصلاً
+  if (c.expirationDate && !c.session) return false
   return true
 }
 
-/** تفاصيل إعادة الكتابة المثبتة (منطق نقي — نفس بناء agent-app) */
 export function hardenedCookieDetails(c: HardenableCookie, nowSec = Date.now() / 1000) {
   const bare = c.domain.replace(/^\./, '')
   return {
@@ -93,15 +73,9 @@ async function hardenOne(ses: Electron.Session, cookie: Electron.Cookie, removed
       sameSite: d.sameSite as Electron.CookiesSetDetails['sameSite'],
       expirationDate: d.expirationDate
     })
-  } catch {
-    /* best-effort: فشل تثبيت كوكي واحدة لا يستحق كسر أي شيء */
-  }
+  } catch {}
 }
 
-/**
- * ثبّت دخول جلسة المعاينة: مستمع تحويل + تفريغ دوري + تنظيف UA.
- * آمنة التكرار لنفس الجلسة (idempotent).
- */
 export function hardenPreviewLogins(wc: Electron.WebContents): void {
   try {
     const ses = wc.session
@@ -127,7 +101,6 @@ export function hardenPreviewLogins(wc: Electron.WebContents): void {
   }
 }
 
-/** فكّ التثبيت (يُستدعى من `destroyView`) — fail-safe */
 export function releasePreviewLogins(): void {
   try {
     const ses = session.fromPartition(LOGIN_PARTITION)
@@ -135,21 +108,14 @@ export function releasePreviewLogins(): void {
     if (!b) return
     try {
       ses.cookies.removeListener('changed', b.handler)
-    } catch {
-      /* تجاهل */
-    }
+    } catch {}
     clearInterval(b.timer)
     bound.delete(ses)
-  } catch {
-    /* تجاهل */
-  }
+  } catch {}
 }
 
-/** تفريغ مخزن الكوكيز إلى القرص فوراً — تُستدعى من المؤقت ومن `before-quit` */
 export async function flushPreviewCookies(): Promise<void> {
   try {
     await session.fromPartition(LOGIN_PARTITION).cookies.flushStore()
-  } catch {
-    /* best-effort */
-  }
+  } catch {}
 }
