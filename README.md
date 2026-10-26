@@ -138,6 +138,26 @@ npm run verify:agent-fixes   # حزمة تحقق سريعة (تشمل فحوصا
 
 فحوص ويندوز الحيّة (لقطات، نوافذ، إدخال Win32) تحتاج ويندوز حقيقي.
 
+## النشر على GitHub
+
+- المستودع: <https://github.com/ea0510600163-gif/nt-studio> — الفرع `main`، والمثبّتات في **Releases**.
+- المجلد `release/` ليس في Git (مُستثنى)، فالمثبّت يُرفع يدوياً إلى Releases.
+
+**تحديث الكود:**
+
+```powershell
+npm run typecheck; npm test
+git add -A
+git commit -m "وصف التغيير"
+git push origin HEAD:main
+```
+
+**إصدار مثبّت جديد:**
+
+1. ارفع `version` في `package.json`.
+2. `npm run dist` ينتج ملف `.exe` داخل `release/`.
+3. GitHub ← **Releases** ← **Draft a new release** ← الوسم `vX.Y.Z` ← ارفع ملف `.exe` ← **Publish**.
+
 ## ملاحظات تشغيلية
 
 - البحث في الويب: DuckDuckGo ثم Bing (بلا مفتاح). يمكن استبداله بـ Brave/Tavily في `src/main/tools/web.ts`.
