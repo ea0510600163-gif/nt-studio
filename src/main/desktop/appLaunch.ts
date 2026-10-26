@@ -74,14 +74,12 @@ export async function launchApplication(
   if (learned && existsSync(learned)) {
     const err = await shell.openPath(learned)
     if (!err) {
-      await sleep(550)
       return { ok: true, message: `شُغّل التطبيق من مساره المحفوظ في الذاكرة: ${learned}` }
     }
   }
 
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(mapped) || /^ms-[a-z0-9-]+:/i.test(mapped)) {
     await shell.openExternal(mapped)
-    await sleep(550)
     return { ok: true, message: `فُتح البروتوكول/الرابط: ${mapped}` }
   }
 
@@ -89,7 +87,6 @@ export async function launchApplication(
     const err = await shell.openPath(mapped)
     if (!err) {
       learnApp(raw, mapped)
-      await sleep(550)
       return { ok: true, message: `فُتح البرنامج من المسار: ${mapped}` }
     }
   }
@@ -99,7 +96,6 @@ export async function launchApplication(
     const err = await shell.openPath(shortcut)
     if (!err) {
       learnApp(raw, shortcut)
-      await sleep(650)
       return { ok: true, message: `شُغّل التطبيق من قائمة ابدأ: ${shortcut}` }
     }
   }
@@ -117,7 +113,7 @@ export async function launchApplication(
       child.unref()
       setTimeout(() => {
         resolve({ ok: true, message: `شُغّل التطبيق: ${mapped}` })
-      }, 550)
+      }, 80)
     } catch {
       execFile(
         'powershell.exe',

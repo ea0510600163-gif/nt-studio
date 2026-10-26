@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { RotateCcw, TriangleAlert } from 'lucide-react'
 import type { ApprovalRequest } from '@shared/types'
 import Chat from './components/Chat'
@@ -118,30 +118,42 @@ function AppContent() {
   }, [])
   useEffect(() => { wRef.current = chatW }, [chatW])
 
+  const moveDrag = useCallback((clientX: number) => {
+    if (!drag.current) return
+    const w = clampW((workspace.current?.getBoundingClientRect().right ?? window.innerWidth) - clientX)
+    wRef.current = w
+    useStore.getState().setChatWidth(w)
+  }, [])
+
+  const endDrag = useCallback(() => {
+    if (!drag.current) return
+    drag.current = false
+    document.body.style.cursor = ''
+    localStorage.setItem('nt.chatW', String(wRef.current))
+    void window.nt.preview.setSuppressed(false)
+  }, [])
+
+  const startDrag = (e: ReactPointerEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    drag.current = true
+    document.body.style.cursor = 'col-resize'
+    try { e.currentTarget.setPointerCapture(e.pointerId) } catch {}
+    void window.nt.preview.setSuppressed(true)
+  }
+
   useEffect(() => {
-    const mv = (e: PointerEvent) => {
-      if (!drag.current) return
-      const w = clampW((workspace.current?.getBoundingClientRect().right ?? window.innerWidth) - e.clientX)
-      wRef.current = w
-      useStore.getState().setChatWidth(w)
-    }
-    const end = () => {
-      if (!drag.current) return
-      drag.current = false
-      document.body.style.cursor = ''
-      localStorage.setItem('nt.chatW', String(wRef.current))
-    }
+    const mv = (e: PointerEvent) => moveDrag(e.clientX)
     window.addEventListener('pointermove', mv)
-    window.addEventListener('pointerup', end)
-    window.addEventListener('pointercancel', end)
-    window.addEventListener('blur', end)
+    window.addEventListener('pointerup', endDrag)
+    window.addEventListener('pointercancel', endDrag)
+    window.addEventListener('blur', endDrag)
     return () => {
       window.removeEventListener('pointermove', mv)
-      window.removeEventListener('pointerup', end)
-      window.removeEventListener('pointercancel', end)
-      window.removeEventListener('blur', end)
+      window.removeEventListener('pointerup', endDrag)
+      window.removeEventListener('pointercancel', endDrag)
+      window.removeEventListener('blur', endDrag)
     }
-  }, [])
+  }, [moveDrag, endDrag])
 
   useEffect(() => {
     const k = (e: KeyboardEvent) => {
@@ -198,7 +210,12 @@ function AppContent() {
               aria-valuemin={W_MIN}
               aria-valuemax={W_MAX}
               tabIndex={0}
-              onPointerDown={() => { drag.current = true; document.body.style.cursor = 'col-resize' }}
+              draggable={false}
+              onPointerDown={startDrag}
+              onPointerMove={(e) => moveDrag(e.clientX)}
+              onPointerUp={endDrag}
+              onPointerCancel={endDrag}
+              onLostPointerCapture={endDrag}
               onKeyDown={(e) => {
                 if (e.key === 'ArrowLeft') { e.preventDefault(); setWidth(chatW + W_STEP) }
                 else if (e.key === 'ArrowRight') { e.preventDefault(); setWidth(chatW - W_STEP) }

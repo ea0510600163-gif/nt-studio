@@ -1,9 +1,11 @@
 export type ResponsesCall = { id: string; name: string; args: string }
 
+import type { LlmUsage } from './types.ts'
+
 export interface ResponsesState {
   text: string
   calls: Map<number, ResponsesCall>
-  usage: { input: number; output: number }
+  usage: LlmUsage
   done: boolean
   maxTokens: boolean
   error?: string
@@ -68,8 +70,13 @@ export function reduceResponses(st: ResponsesState, j: any, onText: (s: string) 
   if (type === 'response.completed' || type === 'response.incomplete' || type === 'response.failed') {
     const r = j.response ?? {}
     if (r.usage) {
+      const cached = r.usage.input_tokens_details?.cached_tokens
       st.usage.input = r.usage.input_tokens ?? st.usage.input
       st.usage.output = r.usage.output_tokens ?? st.usage.output
+      if (typeof cached === 'number' && cached > 0) {
+        st.usage.cachedRead = cached
+        st.usage.input = Math.max(0, st.usage.input - cached)
+      }
     }
     if (type === 'response.failed') {
       setError(st, r.error?.message ?? r.error ?? 'فشل الرد')

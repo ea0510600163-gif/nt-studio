@@ -1,5 +1,12 @@
 export type ApiStyle = 'openai' | 'anthropic' | 'responses'
 
+export interface ModelCost {
+  input: number
+  output: number
+  cacheRead?: number
+  cacheWrite?: number
+}
+
 export interface ModelInfo {
   id: string
   tools: boolean
@@ -8,6 +15,7 @@ export interface ModelInfo {
   apiStyle?: ApiStyle
   maxOutput?: number
   origin?: 'catalog' | 'manual'
+  cost?: ModelCost
 }
 
 export interface ProviderPublic {
@@ -177,7 +185,7 @@ export type AgentEvent =
   | { t: 'project_bound'; sessionId: string; project: ProjectInfo; __seq?: number }
   | { t: 'ask'; sessionId: string; askId: string; question: string; options?: string[]; __seq?: number }
   | { t: 'notice'; sessionId: string; level: 'info' | 'warn' | 'error'; text: string; __seq?: number }
-  | { t: 'usage'; sessionId: string; contextTokens: number; contextWindow: number; step: number; __seq?: number }
+  | { t: 'usage'; sessionId: string; contextTokens: number; contextWindow: number; step: number; cost?: number; __seq?: number }
   | {
       t: 'run_end'
       sessionId: string

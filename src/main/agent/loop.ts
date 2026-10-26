@@ -4,7 +4,7 @@ import { send } from '../bus'
 import { log, redact } from '../logger'
 import { callLlm } from '../providers/llm'
 import { withRetry } from '../providers/retry'
-import { Block, LlmError, LlmResult, Msg } from '../providers/types'
+import { Block, LlmError, LlmResult, Msg, ToolSchema } from '../providers/types'
 import { ResolvedTarget, getSettings, listVisionModel, resolveModel } from '../store/providers'
 import { db } from '../store/db'
 import { getTool, toSchemas, toolsForMode } from '../tools/registry'
@@ -20,6 +20,7 @@ import { longTermSection, recordTaskOutcome } from './agentNotes'
 import { pickModelRef } from './modelRef'
 import { buildSystemPrompt } from './prompt'
 import { Session } from './session'
+import { addCost } from '../providers/cost'
 import { promoteReasoningAnswer } from './chatItems'
 import { opencodeSessionKey } from '../providers/opencode/headers'
 import { desktopController } from '../desktop/controller'
@@ -247,7 +248,7 @@ function sameTarget(a: ResolvedTarget, b: ResolvedTarget): boolean {
   return a.provider.id === b.provider.id && a.model.id === b.model.id
 }
 
-async function llmTurn(s: Session, a: Active, system: string, tools: Tool[], signal: AbortSignal) {
+async function llmTurn(s: Session, a: Active, system: string, schemas: ToolSchema[], signal: AbortSignal) {
   emit({ t: 'text_reset', sessionId: s.id })
   emit({ t: 'thinking_reset', sessionId: s.id })
   const modelCap = a.current.model.maxOutput ?? 64_000
@@ -272,7 +273,7 @@ async function llmTurn(s: Session, a: Active, system: string, tools: Tool[], sig
               {
                 system,
                 messages: s.messages,
-                tools: toSchemas(tools),
+                tools: schemas,
                 target: t,
                 signal,
                 maxTokens,
@@ -298,6 +299,7 @@ async function llmTurn(s: Session, a: Active, system: string, tools: Tool[], sig
               }
             )
           )
+          addCost(s, r.usage, t.model.cost)
           const totalMs = Date.now() - tSend
           log.info(`llm ok: ${t.model.id} (محاولة ${attempt}) blocks=${r.content.length} ttfb=${Math.round(ttfbMs / 1000)}s total=${Math.round(totalMs / 1000)}s`)
           return r
@@ -355,12 +357,13 @@ function capThinking(r: LlmResult): LlmResult {
   }
 }
 
-async function summarizer(a: Active, signal: AbortSignal) {
+async function summarizer(s: Session, a: Active, signal: AbortSignal) {
   return async (prompt: string, text: string): Promise<string> => {
     const r = await withRetry(
       () => callLlm({ system: prompt, messages: [{ role: 'user', content: [{ type: 'text', text }] }], tools: [], target: a.current, signal, maxTokens: 3000, sessionId: a.sessionId, idleMs: IDLE_MS_PATIENT, connectMs: LIMITS.llmConnectMs }, { onText: () => {}, onThinking: () => {} }),
       { signal, onRetry: () => {}, maxAttempts: SUMMARIZER_ATTEMPTS }
     )
+    addCost(s, r.usage, a.current.model.cost)
     return r.content.map((b) => (b.type === 'text' ? b.text : '')).join('').trim() || '(ملخص فارغ)'
   }
 }
@@ -493,6 +496,8 @@ export async function runAgent(s: Session, opts: RunOptions): Promise<void> {
   let reason: 'done' | 'stopped' | 'error' | 'max_steps' = 'done'
   let emptyRetries = 0
   let truncations = 0
+  const toolSchemas = toSchemas(toolsForMode(s.mode))
+  const toolsChars = JSON.stringify(toolSchemas).length
 
   try {
     for (let step = 1; ; step++) {
@@ -526,15 +531,13 @@ export async function runAgent(s: Session, opts: RunOptions): Promise<void> {
       }
       drainPending(s)
 
-      const tools = toolsForMode(s.mode)
-      const toolsChars = JSON.stringify(toSchemas(tools)).length
       const lastUserText = [...s.messages].reverse().find((m) => m.role === 'user')?.content.find((b) => b.type === 'text')?.text?.slice(0, 2000)
       let system = await buildSystemPrompt({ settings, project: s.project, plan: s.plan, model: active.current.model, lastUserText, mode: s.mode, memory: memoryFor(s), display: desktopController.logicalSize() })
       let trimmed = dropStaleImages(s.messages)
       trimmed = shrinkOld(s.messages) || trimmed
       let tokens = estimateTokens(system, s.messages, toolsChars)
       const win = active.current.model.contextWindow
-      emit({ t: 'usage', sessionId: s.id, contextTokens: tokens, contextWindow: win, step })
+      emit({ t: 'usage', sessionId: s.id, contextTokens: tokens, contextWindow: win, step, cost: s.cost })
       const compactAt = win * (compactAtThreshold(win, settings.compactAtPercent) / 100)
       if (tokens > compactAt) {
         const compacted = await compactNow(s, active, signal)
@@ -548,7 +551,7 @@ export async function runAgent(s: Session, opts: RunOptions): Promise<void> {
 
       let result
       try {
-        result = await llmTurn(s, active, system, tools, signal)
+        result = await llmTurn(s, active, system, toolSchemas, signal)
       } catch (e) {
         if (e instanceof LlmError && e.kind === 'context') {
           emit({ t: 'notice', sessionId: s.id, level: 'warn', text: 'تجاوز السياق حد النموذج؛ جارٍ التلخيص ثم المحاولة مجدداً.' })
@@ -559,7 +562,7 @@ export async function runAgent(s: Session, opts: RunOptions): Promise<void> {
             emit({ t: 'notice', sessionId: s.id, level: 'warn', text: 'فشل تلخيص السياق؛ قُلّص السجل بقوة قبل إعادة المحاولة.' })
           }
           system = await buildSystemPrompt({ settings, project: s.project, plan: s.plan, model: active.current.model, lastUserText, mode: s.mode, memory: memoryFor(s), display: desktopController.logicalSize() })
-          result = await llmTurn(s, active, system, tools, signal)
+          result = await llmTurn(s, active, system, toolSchemas, signal)
         } else throw e
       }
 
@@ -572,6 +575,7 @@ export async function runAgent(s: Session, opts: RunOptions): Promise<void> {
       }
       emit({ t: 'assistant_done', sessionId: s.id })
       tokens = result.usage.input || tokens
+      emit({ t: 'usage', sessionId: s.id, contextTokens: tokens, contextWindow: win, step, cost: s.cost })
 
       const broken = uses.filter((u) => (u.input as { __parse_error?: string } | undefined)?.__parse_error)
       if (result.truncated) {
@@ -688,7 +692,7 @@ export async function runAgent(s: Session, opts: RunOptions): Promise<void> {
 export async function compactNow(s: Session, a: Active, signal: AbortSignal, keep = 10): Promise<boolean> {
   emit({ t: 'status', sessionId: s.id, phase: 'compacting', label: 'تلخيص السياق' })
   try {
-    const summarize = await summarizer(a, signal)
+    const summarize = await summarizer(s, a, signal)
     let summary = ''
     const compacted = await buildCompacted(s.messages, async (prompt, text) => (summary = await summarize(prompt, text)), keep)
     if (!compacted) return false

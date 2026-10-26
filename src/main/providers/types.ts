@@ -36,11 +36,18 @@ export interface LlmRequest {
   connectMs?: number
 }
 
+export interface LlmUsage {
+  input: number
+  output: number
+  cachedRead?: number
+  cacheWrite?: number
+}
+
 export interface LlmResult {
   content: Block[]
   stop: 'end' | 'tool_use' | 'max_tokens'
   truncated: boolean
-  usage: { input: number; output: number }
+  usage: LlmUsage
 }
 
 export interface LlmHandlers {

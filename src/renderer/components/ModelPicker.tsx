@@ -135,9 +135,10 @@ export default function ModelPicker() {
                       role="option"
                       aria-selected={on}
                       data-active={m.k === act}
+                      data-on={on}
                       onMouseEnter={() => setAct(m.k)}
                       onClick={() => pick(g.id, m.id)}
-                      className={`mono flex w-full items-center r-2 px-2.5 py-1.5 text-start t-xs transition hover:bg-raised ${m.k === act ? 'bg-raised text-brass-hi' : on ? 'text-brass-hi' : 'text-mute'}`}
+                      className="mono menu-item flex w-full items-center r-2 px-2.5 py-1.5 text-start t-xs"
                     >
                       <span className="truncate">{m.id}</span>
                     </button>

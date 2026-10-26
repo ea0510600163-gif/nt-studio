@@ -84,14 +84,15 @@ export function registerIpc() {
     if (!p) return { ok: false, message: 'المزود غير موجود' }
     const target = resolveModel({ providerId: id, modelId: modelId ?? p.models[0]?.id ?? '' })
     if (!target || !target.model.id) return { ok: false, message: 'لا يوجد نموذج لاختباره' }
+    const ctl = new AbortController()
+    const t = setTimeout(() => ctl.abort(), 25000)
     try {
-      const ctl = new AbortController()
-      const t = setTimeout(() => ctl.abort(), 25000)
       const r = await callLlm({ system: 'Reply with the single word: ok', messages: [{ role: 'user', content: [{ type: 'text', text: 'ping' }] }], tools: [], target, signal: ctl.signal, maxTokens: 16 }, { onText: () => {}, onThinking: () => {} })
-      clearTimeout(t)
       return { ok: true, message: `الاتصال سليم (${r.content.length ? 'رد النموذج' : 'بلا نص'})` }
     } catch (e) {
       return { ok: false, message: errMsg(e).slice(0, 300) }
+    } finally {
+      clearTimeout(t)
     }
   })
 

@@ -27,6 +27,12 @@ public class NtDesktopWin32 {
     public static extern bool SetCursorPos(int X, int Y);
 
     [DllImport("user32.dll")]
+    public static extern IntPtr WindowFromPoint(POINT point);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+
+    [DllImport("user32.dll")]
     public static extern bool GetCursorPos(out POINT lpPoint);
 
     [DllImport("user32.dll")]
@@ -46,9 +52,6 @@ public class NtDesktopWin32 {
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
-
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
 
     [DllImport("user32.dll")]
     public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
@@ -305,7 +308,7 @@ public class NtDesktopWin32 {
 
     public static void TypeUnicode(string text, int delayMs) {
         if (string.IsNullOrEmpty(text)) return;
-        bool burst = text.Length > 70;
+        bool burst = delayMs <= 0 || text.Length > 70;
         int baseD = delayMs > 0 ? Math.Min(40, delayMs) : 6;
         List<ushort> buf = new List<ushort>();
         for (int idx = 0; idx < text.Length; idx++) {
@@ -317,12 +320,12 @@ public class NtDesktopWin32 {
                 keybd_event(vk, 0, 0, UIntPtr.Zero);
                 Thread.Sleep(10);
                 keybd_event(vk, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
-                Thread.Sleep(burst ? 6 : 12);
+                Thread.Sleep(burst ? 2 : 12);
                 continue;
             }
             buf.Add((ushort)ch);
             if (burst) {
-                if (buf.Count >= 20) { FlushUnicode(buf); Thread.Sleep(3); }
+                if (buf.Count >= 64 && !(char.IsHighSurrogate(ch) && idx + 1 < text.Length)) { FlushUnicode(buf); Thread.Sleep(1); }
                 continue;
             }
             if (buf.Count >= 2) {
@@ -480,6 +483,20 @@ public class NtDesktopWin32 {
         th.Start();
         if (!th.Join(timeoutMs)) return null;
         return result;
+    }
+
+    public static string FastHitTestJson(int x, int y) {
+        IntPtr hwnd = WindowFromPoint(new POINT { X = x, Y = y });
+        if (hwnd == IntPtr.Zero) return "null";
+        StringBuilder cls = new StringBuilder(256);
+        StringBuilder txt = new StringBuilder(512);
+        GetClassName(hwnd, cls, cls.Capacity);
+        GetWindowText(hwnd, txt, txt.Capacity);
+        RECT r;
+        GetWindowRect(hwnd, out r);
+        string name = txt.ToString().Trim();
+        if (name.Length > 240) name = name.Substring(0, 240);
+        return "{\\\"role\\\":\\\"" + EscJson(cls.ToString()) + "\\\",\\\"name\\\":\\\"" + EscJson(name) + "\\\",\\\"cx\\\":" + x + ",\\\"cy\\\":" + y + ",\\\"x\\\":" + r.Left + ",\\\"y\\\":" + r.Top + ",\\\"width\\\":" + (r.Right-r.Left) + ",\\\"height\\\":" + (r.Bottom-r.Top) + "}";
     }
 
     public static string HitTestJson(int x, int y) {
@@ -907,7 +924,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
                 [NtDesktopWin32]::SmoothMove([int]$req.x, [int]$req.y, $dur)
                 $pt = New-Object NtDesktopWin32+POINT
                 [void][NtDesktopWin32]::GetCursorPos([ref]$pt)
-                $hit = [NtDesktopWin32]::HitTestBounded($pt.X, $pt.Y, 6000)
+                $hit = [NtDesktopWin32]::FastHitTestJson($pt.X, $pt.Y)
                 $at = [NtDesktopWin32]::EscJson([NtDesktopWin32]::ActiveWindowTitle())
                 Write-Output ("{""id"":$id,""ok"":true,""x"":$($pt.X),""y"":$($pt.Y),""activeTitle"":""$at"",""hit"":$hit}")
             }
@@ -918,7 +935,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
                 [NtDesktopWin32]::Click($btn, [int]$req.x, [int]$req.y, $cnt, $mv)
                 $pt = New-Object NtDesktopWin32+POINT
                 [void][NtDesktopWin32]::GetCursorPos([ref]$pt)
-                $hit = [NtDesktopWin32]::HitTestBounded($pt.X, $pt.Y, 6000)
+                $hit = [NtDesktopWin32]::FastHitTestJson($pt.X, $pt.Y)
                 $at = [NtDesktopWin32]::EscJson([NtDesktopWin32]::ActiveWindowTitle())
                 Write-Output ("{""id"":$id,""ok"":true,""x"":$($pt.X),""y"":$($pt.Y),""activeTitle"":""$at"",""hit"":$hit}")
             }
@@ -987,7 +1004,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
                 Write-Output (@{ id = $id; ok = $true; activeTitle = [NtDesktopWin32]::ActiveWindowTitle(); activeProc = [NtDesktopWin32]::ActiveWindowProcess() } | ConvertTo-Json -Compress)
             }
             "hitTest" {
-                $hit = [NtDesktopWin32]::HitTestBounded([int]$req.x, [int]$req.y, 6000)
+                $hit = [NtDesktopWin32]::FastHitTestJson([int]$req.x, [int]$req.y)
                 Write-Output ("{""id"":$id,""ok"":true,""hit"":$hit}")
             }
             "inspectUi" {

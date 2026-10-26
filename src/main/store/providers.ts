@@ -57,7 +57,7 @@ export function setSettings(patch: Partial<Settings>): Settings {
   return next
 }
 
-const OPENCODE_CATALOG_VERSION = '2026-10-20'
+const OPENCODE_CATALOG_VERSION = '2026-10-26'
 
 export function syncOpencodeCatalog() {
   if (db().get<{ v: string }>('kv', 'opencodeCatalogVersion')?.v === OPENCODE_CATALOG_VERSION) return

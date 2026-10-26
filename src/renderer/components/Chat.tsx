@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowDown, Bot, Check, ChevronDown, ChevronLeft, CircleAlert, Clock3, Copy, FilePlus2, FileText, FolderOpen, FolderPlus, ImagePlus, Info, Layers3, LoaderCircle, PanelLeftClose, PanelLeftOpen, Plus, RefreshCw, RotateCcw, SendHorizontal, Settings2, Sparkles, Square, TerminalSquare, WandSparkles, X } from 'lucide-react'
+import { AlertTriangle, ArrowDown, Bot, Check, ChevronDown, ChevronLeft, CircleAlert, Clock3, Copy, FilePlus2, FileText, FolderOpen, FolderPlus, ImagePlus, Info, Layers3, LoaderCircle, MessageSquarePlus, PanelLeftClose, PanelLeftOpen, Plus, RefreshCw, RotateCcw, SendHorizontal, Settings2, Sparkles, Square, TerminalSquare, WandSparkles, X } from 'lucide-react'
 import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ChatItem, Phase, PickedFile, PickedFolder, SkillInfo } from '@shared/types'
 import ProjectPicker from './ProjectPicker'
@@ -28,6 +28,9 @@ const clockOf = (ts: number): string =>
 
 const compactNum = (n: number): string =>
   n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}K` : String(n)
+
+const compactUsd = (v: number): string =>
+  v < 0.01 ? `$${v.toFixed(4)}` : v < 1 ? `$${v.toFixed(3)}` : `$${v.toFixed(2)}`
 
 const sameItems = (a: readonly ChatItem[], b: readonly ChatItem[]): boolean =>
   a.length === b.length && a.every((x, i) => x === b[i])
@@ -895,6 +898,11 @@ function Composer({ sessionId }: { sessionId: string | null }) {
               {compactNum(usage.tokens)} / {compactNum(usage.window)}
             </span>
           )}
+          {usage?.cost != null && usage.cost > 0 && (
+            <span className="composer-gauge num" dir="ltr" title="التكلفة المتراكمة للجلسة بالدولار وفق سعر النموذج لكل مليون رمز (إدخال/إخراج/كاش)">
+              {compactUsd(usage.cost)}
+            </span>
+          )}
           {anyRunning && (
             <button className="btn btn-danger h-[var(--sp-8)]! px-[var(--sp-3)]!" onClick={() => void stop()} title="إيقاف فوري">
               <Square size={12} fill="currentColor" /> إيقاف
@@ -1005,18 +1013,17 @@ export default function Chat({ railOpen, onRail }: { railOpen: boolean; onRail: 
           title={railOpen ? 'إخفاء الشريط الجانبي واستعادة المساحة' : 'إظهار الشريط الجانبي'}
           onClick={onRail}
         >
-          {railOpen ? <PanelLeftClose size={14} /> : <PanelLeftOpen size={14} />}
+          {railOpen ? <PanelLeftClose size={18} /> : <PanelLeftOpen size={18} />}
         </button>
-        <h2>محادثة البناء</h2>
         <button
           type="button"
-          className="icon-btn ms-2"
+          className="new-chat me-2"
           disabled={running}
           aria-label={mode === 'agent' ? 'شات وكيل جديد' : 'محادثة جديدة'}
           title={mode === 'agent' ? 'شات وكيل جديد' : 'محادثة جديدة'}
           onClick={() => void newSession().catch(() => useStore.getState().notify('تعذّر فتح المحادثة', 'error'))}
         >
-          <Plus size={14} />
+          <MessageSquarePlus size={14} />
         </button>
         <span className="flex-1" />
         <div className="flex items-center gap-2">

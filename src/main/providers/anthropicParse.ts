@@ -1,4 +1,4 @@
-import { LlmError, type Block } from './types.ts'
+import { LlmError, type Block, type LlmUsage } from './types.ts'
 import { parseArgs } from './transport.ts'
 import { uid } from '../util.ts'
 
@@ -6,7 +6,7 @@ export interface AnthropicState {
   blocks: Map<number, { kind: 'text' | 'tool' | 'thinking'; text: string; id: string; name: string; json: string; signature?: string }>
   stopReason: string
   done: boolean
-  usage: { input: number; output: number }
+  usage: LlmUsage
 }
 
 export function newAnthropicState(): AnthropicState {
@@ -15,9 +15,11 @@ export function newAnthropicState(): AnthropicState {
 
 export function reduceAnthropic(st: AnthropicState, j: any, onText: (s: string) => void, onThinking?: (s: string) => void): void {
   switch (j.type) {
-    case 'message_start':
-      st.usage.input = j.message?.usage?.input_tokens ?? 0
+    case 'message_start': {
+      const u = j.message?.usage ?? {}
+      st.usage = { input: u.input_tokens ?? 0, output: 0, cachedRead: u.cache_read_input_tokens ?? 0, cacheWrite: u.cache_creation_input_tokens ?? 0 }
       break
+    }
     case 'content_block_start': {
       const cb = j.content_block
       if (cb?.type === 'tool_use') st.blocks.set(j.index, { kind: 'tool', text: '', id: cb.id, name: cb.name, json: '' })
@@ -47,6 +49,8 @@ export function reduceAnthropic(st: AnthropicState, j: any, onText: (s: string) 
     case 'message_delta':
       st.stopReason = j.delta?.stop_reason ?? st.stopReason
       st.usage.output = j.usage?.output_tokens ?? st.usage.output
+      if (typeof j.usage?.cache_read_input_tokens === 'number') st.usage.cachedRead = j.usage.cache_read_input_tokens
+      if (typeof j.usage?.cache_creation_input_tokens === 'number') st.usage.cacheWrite = j.usage.cache_creation_input_tokens
       break
     case 'message_stop':
       st.done = true

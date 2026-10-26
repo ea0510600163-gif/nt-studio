@@ -8,6 +8,10 @@ const num = (v: unknown): number | undefined => {
   const n = typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN
   return Number.isFinite(n) && n > 0 ? n : undefined
 }
+const money = (v: unknown): number | undefined => {
+  const n = typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN
+  return Number.isFinite(n) && n >= 0 ? n : undefined
+}
 const list = (v: unknown): unknown[] => (Array.isArray(v) ? v : [])
 const hasImage = (v: unknown): boolean => list(v).some((x) => typeof x === 'string' && /image/i.test(x))
 const hasCap = (v: unknown, name: string): boolean => list(v).some((x) => typeof x === 'string' && x.toLowerCase() === name)
@@ -34,6 +38,7 @@ export function metaFromItem(raw: unknown): Partial<ModelInfo> {
   const arch = rec(r.architecture)
   const mods = rec(r.modalities)
   const owner = rec(r.provider)
+  const price = rec(r.cost)
   const contextWindow =
     num(r.context_window) ?? num(r.context_length) ?? num(limit.context) ?? num(r.max_context_length) ?? num(r.max_input_tokens)
   const maxOutput =
@@ -44,24 +49,36 @@ export function metaFromItem(raw: unknown): Partial<ModelInfo> {
     typeof r.tool_call === 'boolean' ? r.tool_call : hasCap(r.capabilities, 'tools') ? true : typeof r.supports_tools === 'boolean' ? r.supports_tools : undefined
   const endpoint = typeof owner.api === 'string' ? owner.api : typeof r.api === 'string' ? r.api : typeof r.npm === 'string' ? r.npm : ''
   const apiStyle = endpoint ? styleFromEndpoint(endpoint) : undefined
+  const inp = money(price.input)
+  const outp = money(price.output)
+  const cr = money(price.cache_read)
+  const cw = money(price.cache_write)
   const out: Partial<ModelInfo> = {}
   if (contextWindow) out.contextWindow = contextWindow
   if (maxOutput) out.maxOutput = maxOutput
   if (vision !== undefined) out.vision = vision
   if (tools !== undefined) out.tools = tools
   if (apiStyle) out.apiStyle = apiStyle
+  if (inp !== undefined && outp !== undefined)
+    out.cost = { input: inp, output: outp, ...(cr !== undefined ? { cacheRead: cr } : {}), ...(cw !== undefined ? { cacheWrite: cw } : {}) }
   return out
 }
 
 export function enrichModel(
   id: string,
-  sources: { live?: Partial<ModelInfo>; catalog?: Partial<ModelInfo>; provider?: Partial<ModelInfo> } = {}
+  sources: {
+    live?: Partial<ModelInfo>
+    catalog?: Partial<ModelInfo>
+    provider?: Partial<ModelInfo>
+    dev?: Partial<ModelInfo>
+  } = {}
 ): ModelInfo {
   const out: ModelInfo = { ...inferModel(id), id }
-  for (const layer of [sources.provider, sources.catalog, sources.live]) {
+  for (const layer of [sources.provider, sources.catalog, sources.dev, sources.live]) {
     if (!layer) continue
     for (const key of Object.keys(layer) as Array<keyof ModelInfo>) {
       if (key === 'id') continue
+      if (key === 'apiStyle' && layer === sources.dev) continue
       const value = layer[key]
       if (value === undefined || value === null) continue
       ;(out as unknown as Record<string, unknown>)[key] = value

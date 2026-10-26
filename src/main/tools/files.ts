@@ -189,6 +189,10 @@ export const fileTools: Tool[] = [
             sections.push(`═══ ${p} (مجلد) ═══`)
             continue
           }
+          if (st.size > MAX_READ_BYTES) {
+            sections.push(`═══ ${p} (ملف كبير — ${(st.size / 1e6).toFixed(1)}MB) ═══`)
+            continue
+          }
           const buf = readFileSync(p)
           if (isBinary(buf)) {
             sections.push(`═══ ${p} (ملف ثنائي — ${st.size}B) ═══`)

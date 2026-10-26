@@ -42,6 +42,17 @@ import {
 
 const DEFAULT_LOGICAL: Size = { w: 1366, h: 768 }
 
+interface DesktopShot {
+  mediaType: string
+  data: string
+  width: number
+  height: number
+  cursorX: number
+  cursorY: number
+  activeTitle: string
+  activeProc: string
+  unchanged: boolean
+}
 
 export interface ComputerStepInput {
   action: string
@@ -93,6 +104,7 @@ export class DesktopController {
   private takeoverReturnedFlag = false
   private logical: Size = { ...DEFAULT_LOGICAL }
   private observed = false
+  private lastShot: DesktopShot | null = null
   private stopCallback: ((sessionId?: string) => void) | null = null
   private activeSessionId: string | null = null
   private frameFp: FrameFingerprint | null = null
@@ -117,6 +129,7 @@ export class DesktopController {
     this.pauseStartedAt = null
     this.takeoverReturnedFlag = false
     this.observed = false
+    this.lastShot = null
     this.lastZoom = null
     this.cycleGuard.reset()
     this.frameFp = null
@@ -281,12 +294,21 @@ export class DesktopController {
     while (this.state.status === 'paused' || this.state.status === 'takeover') {
       if (signal?.aborted) return
       await new Promise<void>((resolve) => {
-        const onAbort = () => resolve()
-        signal?.addEventListener('abort', onAbort, { once: true })
-        this.pauseResolvers.push(() => {
+        let wake = () => {}
+        const cleanup = () => {
           signal?.removeEventListener('abort', onAbort)
+          this.pauseResolvers = this.pauseResolvers.filter((fn) => fn !== wake)
+        }
+        const onAbort = () => {
+          cleanup()
           resolve()
-        })
+        }
+        wake = () => {
+          cleanup()
+          resolve()
+        }
+        this.pauseResolvers.push(wake)
+        signal?.addEventListener('abort', onAbort, { once: true })
       })
     }
   }
@@ -396,16 +418,7 @@ export class DesktopController {
     }
   }
 
-  async screenshot(countStat = true): Promise<{
-    mediaType: string
-    data: string
-    width: number
-    height: number
-    cursorX: number
-    cursorY: number
-    activeTitle: string
-    unchanged?: boolean
-  }> {
+  async screenshot(countStat = true): Promise<DesktopShot> {
     try {
       const cursorInfo = await win32Worker.call<any>('cursor').catch(() => null)
       if (cursorInfo && cursorInfo.screenW && cursorInfo.screenH) {
@@ -470,7 +483,7 @@ export class DesktopController {
     }
     this.broadcast()
 
-    return {
+    const shot: DesktopShot = {
       mediaType: 'image/jpeg',
       data: base64,
       width: LW,
@@ -478,8 +491,16 @@ export class DesktopController {
       cursorX: this.state.cursor.x,
       cursorY: this.state.cursor.y,
       activeTitle: this.state.activeWindowTitle,
+      activeProc: this.state.activeWindowProcess,
       unchanged
     }
+    this.lastShot = shot
+    return shot
+  }
+
+  private async capturedShot(countStat: boolean, capture: boolean): Promise<DesktopShot> {
+    if (capture || !this.lastShot) return this.screenshot(countStat)
+    return this.lastShot
   }
 
   async inspectUiElements(maxItems = 35): Promise<Win32UiElement[]> {
@@ -615,7 +636,9 @@ export class DesktopController {
         height: plan.out.h,
         cursorX: this.state.cursor.x,
         cursorY: this.state.cursor.y,
-        activeTitle: this.state.activeWindowTitle
+        activeTitle: this.state.activeWindowTitle,
+        activeProc: this.state.activeWindowProcess,
+        unchanged: false
       },
       note
     }
@@ -623,8 +646,9 @@ export class DesktopController {
 
   async executeComputerAction(
     input: ComputerStepInput,
-    signal?: AbortSignal
-  ): Promise<{ summary: string; shot: Awaited<ReturnType<DesktopController['screenshot']>>; blocked?: boolean }> {
+    signal?: AbortSignal,
+    capture = true
+  ): Promise<{ summary: string; shot: DesktopShot; blocked?: boolean }> {
     await this.waitWhilePaused(signal)
     if (signal?.aborted) throw new Error('أُوقفت العملية')
 
@@ -635,10 +659,11 @@ export class DesktopController {
 
     if ((kind === 'batch' || Array.isArray(input.steps)) && Array.isArray(input.steps) && input.steps.length > 0) {
       const stepSummaries: string[] = []
-      let lastRes: { summary: string; shot: Awaited<ReturnType<DesktopController['screenshot']>>; blocked?: boolean } | null = null
-      for (const sub of input.steps.slice(0, 25)) {
+      let lastRes: { summary: string; shot: DesktopShot; blocked?: boolean } | null = null
+      const steps = input.steps.slice(0, 25)
+      for (const [index, sub] of steps.entries()) {
         if (signal?.aborted) break
-        lastRes = await this.executeComputerAction({ ...sub, steps: undefined }, signal)
+        lastRes = await this.executeComputerAction({ ...sub, steps: undefined }, signal, index === steps.length - 1)
         stepSummaries.push(lastRes.summary.split(' | ')[0] || sub.action)
       }
       if (lastRes) {
@@ -651,7 +676,7 @@ export class DesktopController {
 
     if (kind === 'clipboard_read') {
       const text = String((await Promise.resolve(clipboard.readText())) ?? '')
-      const shot = await this.screenshot(false)
+      const shot = await this.capturedShot(false, capture)
       return {
         summary: `محتوى الحافظة (${text.length} حرف):\n${text || '(الحافظة فارغة)'}`,
         shot
@@ -661,7 +686,7 @@ export class DesktopController {
     if (kind === 'clipboard_write') {
       const text = String(input.text ?? '')
       clipboard.writeText(text)
-      const shot = await this.screenshot(false)
+      const shot = await this.capturedShot(false, capture)
       return {
         summary: `نُسخ إلى الحافظة (${text.length} حرف): «${text.slice(0, 80)}»`,
         shot
@@ -670,7 +695,7 @@ export class DesktopController {
 
     if (kind === 'inspect_ui' || kind === 'ui_map') {
       const els = await this.inspectUiElements(45)
-      const shot = await this.screenshot(false)
+      const shot = await this.capturedShot(false, capture)
       const formatted = els.length
         ? els.map((e) => `[#${e.id}] ${e.role} «${e.name || 'بلا عنوان'}» ← coordinate: [${e.cx}, ${e.cy}] (${e.width}×${e.height})`).join('\n')
         : '(لم تُكتشف عناصر UIA قياسية في هذه النافذة — اعتمد على الإحداثيات البصرية المباشرة من اللقطة)'
@@ -726,7 +751,7 @@ export class DesktopController {
           .map((c) => c.name)
           .filter(Boolean)
           .slice(0, 12)
-        const shot = await this.screenshot(false)
+        const shot = await this.capturedShot(false, capture)
         return {
           summary:
             `لم يُعثر على عنصر واجهة باسم «${String(input.target).trim()}» في النافذة «${this.state.activeWindowTitle || 'سطح المكتب'}».\n` +
@@ -811,7 +836,7 @@ export class DesktopController {
         this.state.activeWindowTitle = String(c.activeTitle || '')
         this.state.activeWindowProcess = String(c.activeProc || '')
         this.broadcast()
-        const shot = await this.screenshot(false)
+        const shot = await this.capturedShot(false, capture)
         return {
           summary: `موقع المؤشر الحالي: (${logPos.x}, ${logPos.y}) | النافذة النشطة: «${this.state.activeWindowTitle || 'سطح المكتب'}»${this.state.activeWindowProcess ? ` (${this.state.activeWindowProcess})` : ''}`,
           shot
@@ -1092,15 +1117,15 @@ export class DesktopController {
     }
 
     const settleMs = kind === 'type' || kind === 'key' ? 75 : 60
-    await sleep(settleMs, signal).catch(() => {})
-    const shot = await this.screenshot(true)
+    await sleep(settleMs, signal)
+    const shot = await this.capturedShot(true, capture)
 
-    const delta = compareFingerprints(beforeFp, this.frameFp)
+    const delta = capture ? compareFingerprints(beforeFp, this.frameFp) : { changed: true, mad: 0, changedCells: 0 }
     const cycle = this.cycleGuard.observe(kind, delta.changed, { x: target?.clampedX, y: target?.clampedY, sig })
 
     const lastTrace = this.state.lastAction
     if (lastTrace) {
-      lastTrace.changedScreen = delta.changed
+      lastTrace.changedScreen = capture ? delta.changed : undefined
       lastTrace.ms = Date.now() - actionStartMs
     }
     const stuckEligible = POINTER_ACTIONS.has(kind) ? 1 : 3
@@ -1179,7 +1204,7 @@ export class DesktopController {
     for (let i = 0; i < Math.max(1, attempts); i++) {
       last = await this.focusWindow(query, maximize, false)
       if (last.ok) return last
-      await sleep(gapMs)
+      if (i + 1 < Math.max(1, attempts)) await sleep(gapMs)
     }
     return last
   }

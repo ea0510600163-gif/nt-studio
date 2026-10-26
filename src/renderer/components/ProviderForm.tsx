@@ -14,20 +14,25 @@ const MAX_MODELS = 80
 const CTX = { min: 1024, max: 4_000_000 }
 const OUT = { min: 256, max: 2_000_000 }
 const OUT_DEFAULT = 64_000
+const PRICE = { min: 0, max: 1_000 }
 const ERR_URL = 'رابط غير صالح — مثال: https://api.example.com/v1'
 const URL_RE = /^https?:\/\/[a-z0-9.-]+(?::\d+)?(?:[/?#]\S*)?$/i
 const errText = (e: unknown) => (e as Error).message.replace(/^Error invoking remote method '[^']+': /, '')
 const num = (n: number) => n.toLocaleString('en-US')
+const fp = (n: number) => String(+(n.toFixed(6)))
+const patchCost = (m: ModelInfo, p: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number }): Partial<ModelInfo> => ({
+  cost: { input: m.cost?.input ?? 0, output: m.cost?.output ?? 0, cacheRead: m.cost?.cacheRead, cacheWrite: m.cost?.cacheWrite, ...p }
+})
 
-function CapNum({ label, hint, value, min, max, onCommit }: { label: string; hint: string; value: number; min: number; max: number; onCommit: (n: number) => void }) {
+function CapNum({ label, hint, value, min, max, onCommit, float = false }: { label: string; hint: string; value: number; min: number; max: number; onCommit: (n: number) => void; float?: boolean }) {
   const [raw, setRaw] = useState(() => String(value))
   const [dirty, setDirty] = useState(false)
   useEffect(() => { if (!dirty) setRaw(String(value)) }, [value, dirty])
   const n = Number(raw)
-  const bad = raw.trim() === '' || !Number.isInteger(n) || n < min || n > max
+  const bad = raw.trim() === '' || !Number.isFinite(n) || (!float && !Number.isInteger(n)) || n < min || n > max
   const commit = () => {
     setDirty(false)
-    const v = Number.isInteger(n) ? Math.min(max, Math.max(min, n)) : min
+    const v = Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : min
     setRaw(String(v))
     onCommit(v)
   }
@@ -37,6 +42,7 @@ function CapNum({ label, hint, value, min, max, onCommit }: { label: string; hin
       <input
         dir="ltr"
         type="number"
+        step={float ? 'any' : 1}
         className="field mono t-md"
         min={min}
         max={max}
@@ -46,7 +52,7 @@ function CapNum({ label, hint, value, min, max, onCommit }: { label: string; hin
         onBlur={commit}
         onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); commit() } }}
       />
-      <p className={`t-2xs mt-1 ${bad ? 'text-coral' : 'text-faint'}`}>{bad ? `عدد صحيح بين ${num(min)} و ${num(max)}` : hint}</p>
+      <p className={`t-2xs mt-1 ${bad ? 'text-coral' : 'text-faint'}`}>{bad ? `عدد ${float ? '' : 'صحيح '}بين ${num(min)} و ${num(max)}` : hint}</p>
     </div>
   )
 }
@@ -182,6 +188,7 @@ export default function ProviderForm({ initial, onDone, onCancel }: { initial?: 
                     {m.apiStyle && <span className="badge" data-tone="mute">{m.apiStyle === 'anthropic' ? 'messages' : m.apiStyle === 'responses' ? 'responses' : 'chat'}</span>}
                     <span className="badge" data-tone={m.tools ? 'sky' : 'mute'}>{m.tools ? 'أدوات' : 'نصّي'}</span>
                     {m.vision && <span className="badge" data-tone="jade">صور</span>}
+                    {m.cost && <span className="badge num" data-tone="mute" title="سعر لكل مليون رمز — إدخال/إخراج">${fp(m.cost.input)}/${fp(m.cost.output)}</span>}
                     <button className="icon-btn" onClick={() => setOpen(open === m.id ? '' : m.id)} aria-expanded={open === m.id} aria-controls={capsId} aria-label={open === m.id ? 'إخفاء القدرات' : 'تعديل القدرات'}><ChevronDown size={13} className={open === m.id ? 'rotate-180' : ''} /></button>
                     <button className="icon-btn" onClick={() => setModels(models.filter((x) => x.id !== m.id))} aria-label={`حذف ${m.id}`}><Trash2 size={14} /></button>
                   </div>
@@ -194,6 +201,12 @@ export default function ProviderForm({ initial, onDone, onCancel }: { initial?: 
                       <div className="mt-2.5 grid grid-cols-2 gap-3">
                         <CapNum label="نافذة السياق" hint="الحجم الكلّي للسياق — منه يُحسب متى يبدأ التلخيص التلقائي." value={m.contextWindow} min={CTX.min} max={CTX.max} onCommit={(n) => patch(m.id, { contextWindow: n })} />
                         <CapNum label="أقصى إخراج" hint="ميزانية الكتابة في النداء الواحد — تحدّد حجم ما يكتبه المزوّد دفعة واحدة." value={m.maxOutput ?? OUT_DEFAULT} min={OUT.min} max={OUT.max} onCommit={(n) => patch(m.id, { maxOutput: n })} />
+                      </div>
+                      <div className="mt-3 grid grid-cols-2 gap-3">
+                        <CapNum float label="سعر الإدخال ($/مليون)" hint="دولار لكل مليون رمز إدخال — من صفحة أسعار المزود." value={m.cost?.input ?? 0} min={PRICE.min} max={PRICE.max} onCommit={(n) => patch(m.id, patchCost(m, { input: n }))} />
+                        <CapNum float label="سعر الإخراج ($/مليون)" hint="دولار لكل مليون رمز إخراج." value={m.cost?.output ?? 0} min={PRICE.min} max={PRICE.max} onCommit={(n) => patch(m.id, patchCost(m, { output: n }))} />
+                        <CapNum float label="سعر قراءة الكاش ($/مليون)" hint="دولار لكل مليون رمز كاش مقروء — من صفحة أسعار المزود." value={m.cost?.cacheRead ?? 0} min={PRICE.min} max={PRICE.max} onCommit={(n) => patch(m.id, patchCost(m, { cacheRead: n }))} />
+                        <CapNum float label="سعر كتابة الكاش ($/مليون)" hint="دولار لكل مليون رمز تُكتب في الكاش أول مرة — يُبلَّغ عنه في نمط Anthropic فقط." value={m.cost?.cacheWrite ?? 0} min={PRICE.min} max={PRICE.max} onCommit={(n) => patch(m.id, patchCost(m, { cacheWrite: n }))} />
                       </div>
                     </div>
                   )}

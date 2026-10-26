@@ -2,6 +2,7 @@ import { send } from '../bus'
 import { FALLBACK_ATTEMPTS, LIMITS, PRIMARY_ATTEMPTS, idleMsForAttempt } from '../config'
 import { log } from '../logger'
 import { callLlm } from '../providers/llm'
+import { addCost } from '../providers/cost'
 import { opencodeSessionKey } from '../providers/opencode/headers'
 import { withRetry } from '../providers/retry'
 import { Block, LlmError, Msg } from '../providers/types'
@@ -155,8 +156,8 @@ export const subagentTools: Tool[] = [
           if (sig.aborted) throw abortError()
 
           let target = primary
-          const callStep = async (t: typeof primary, maxAttempts: number) =>
-            withRetry(
+          const callStep = async (t: typeof primary, maxAttempts: number) => {
+            const r = await withRetry(
               async (attempt) =>
                 callLlm(
                   {
@@ -178,6 +179,9 @@ export const subagentTools: Tool[] = [
                 onRetry: ({ attempt }) => emitProgress(`↻ إعادة المحاولة (${attempt}/${maxAttempts})…`)
               }
             )
+            if (owner) addCost(owner, r.usage, t.model.cost)
+            return r
+          }
 
           let res
           try {

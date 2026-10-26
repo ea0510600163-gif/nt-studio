@@ -20,6 +20,7 @@ class SqliteDb implements Db {
   kind = 'sqlite' as const
   private d: any
   private cache = new Map<string, any>()
+  private sequences = new Map<string, number>()
   constructor(file: string, Database: any) {
     this.d = new Database(file)
     this.d.pragma('journal_mode = WAL')
@@ -52,9 +53,10 @@ class SqliteDb implements Db {
   }
   msgAppend(sid: string, items: unknown[]) {
     if (!items.length) return
-    const max = this.stmt('SELECT COALESCE(MAX(seq),-1) AS m FROM messages WHERE session_id=?').get(sid).m as number
+    const max = this.sequences.get(sid) ?? (this.stmt('SELECT COALESCE(MAX(seq),-1) AS m FROM messages WHERE session_id=?').get(sid).m as number)
     const ins = this.stmt('INSERT INTO messages(session_id,seq,json) VALUES(?,?,?)')
     this.d.transaction(() => items.forEach((m, i) => ins.run(sid, max + 1 + i, JSON.stringify(m))))()
+    this.sequences.set(sid, max + items.length)
   }
   msgReplace(sid: string, items: unknown[]) {
     const ins = this.stmt('INSERT INTO messages(session_id,seq,json) VALUES(?,?,?)')
@@ -62,9 +64,11 @@ class SqliteDb implements Db {
       this.stmt('DELETE FROM messages WHERE session_id=?').run(sid)
       items.forEach((m, i) => ins.run(sid, i, JSON.stringify(m)))
     })()
+    this.sequences.set(sid, items.length - 1)
   }
   msgDelete(sid: string) {
     this.stmt('DELETE FROM messages WHERE session_id=?').run(sid)
+    this.sequences.delete(sid)
   }
   flushNow() {}
 }

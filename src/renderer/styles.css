@@ -286,6 +286,26 @@ input, textarea, select { font: inherit; color: inherit; }
   background: color-mix(in srgb, var(--color-brass) 12%, transparent);
 }
 
+.menu-item {
+  color: var(--color-mute);
+  transition: background 0.15s, color 0.15s, box-shadow 0.15s;
+}
+.menu-item[data-on='true'] {
+  color: var(--color-brass-hi);
+  background: color-mix(in srgb, var(--color-brass) 9%, transparent);
+}
+.menu-item:hover,
+.menu-item:focus-visible,
+.menu-item[data-active='true'],
+.composer-menu-item:hover,
+.composer-menu-item:focus-visible,
+.composer-menu-item[data-active='true'] {
+  background: color-mix(in srgb, var(--color-brass) 16%, transparent);
+  color: var(--color-brass-hi);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-brass) 45%, transparent), 0 0 10px -2px color-mix(in srgb, var(--color-brass) 50%, transparent);
+  outline: none;
+}
+
 .panel {
   background: var(--color-surface);
   border: 1px solid var(--color-hair);
@@ -531,7 +551,7 @@ input, textarea, select { font: inherit; color: inherit; }
 .workspace-panels { display: flex; flex: 1; min-width: 0; min-height: 0; gap: 0; }
 .chat-column { flex-shrink: 0; height: 100%; min-width: 0; max-width: calc(100% - 250px); }
 .stage-column { flex: 1; min-width: 0; height: 100%; }
-.workspace-divider { position: relative; z-index: 10; width: 12px; flex-shrink: 0; cursor: col-resize; }
+.workspace-divider { position: relative; z-index: 10; width: 12px; flex-shrink: 0; cursor: col-resize; user-select: none; touch-action: none; }
 .workspace-divider::after { content: ''; position: absolute; width: 3px; height: 38px; top: calc(50% - 19px); left: 4px; border-radius: 4px; background: var(--color-hair); transition: background 160ms, box-shadow 160ms; }
 .workspace-divider:hover::after, .workspace-divider:focus-visible::after { background: var(--color-mute); }
 .workspace-panels > [hidden] { display: none !important; }
@@ -571,8 +591,21 @@ input, textarea, select { font: inherit; color: inherit; }
   border-radius: 12px;
 }
 .chat-header { min-height: 38px; display: flex; align-items: center; padding: 3px 14px; border-bottom: 1px solid color-mix(in srgb, var(--color-hair) 65%, transparent); }
-.chat-header h2 { font-size: 13px; font-weight: 600; }
-.chat-header .icon-btn { width: 26px; height: 26px; border-radius: 7px; }
+.chat-header .new-chat {
+  display: inline-flex; align-items: center; justify-content: center; gap: 0.35rem;
+  height: 26px; min-width: 30px; padding-inline: 7px; border-radius: var(--r-full);
+  border: 1px solid color-mix(in srgb, var(--color-brass) 45%, transparent);
+  background: color-mix(in srgb, var(--color-brass) 12%, transparent);
+  color: var(--color-brass-hi);
+  transition: background 0.15s, border-color 0.15s, color 0.15s, transform 0.12s var(--ease-out), box-shadow 0.15s;
+}
+.chat-header .new-chat:hover:not(:disabled) {
+  border-color: var(--color-brass); background: var(--color-brass); color: var(--color-accent-ink);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--color-brass) 40%, transparent);
+}
+.chat-header .new-chat:active:not(:disabled) { transform: scale(0.92); }
+.chat-header .new-chat:disabled { opacity: 0.45; }
+.chat-header .icon-btn { width: 30px; height: 30px; border-radius: 8px; }
 .chat-header .model-pill { height: 26px; padding-inline: var(--sp-2); border-radius: 7px; }
 .status-dot { display: inline-block; width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--color-jade); }
 .chat-scroll { min-height: 0; flex: 1; overflow-y: auto; padding: 10px 12px; overscroll-behavior: contain; }
@@ -948,12 +981,6 @@ input, textarea, select { font: inherit; color: inherit; }
   color: var(--color-mute);
   transition: background 160ms, color 160ms;
 }
-.composer-menu-item:hover,
-.composer-menu-item:focus-visible {
-  background: var(--color-surface);
-  color: var(--color-ink);
-  outline: none;
-}
 .composer-menu-item[aria-checked='true'] {
   color: var(--color-ink);
 }
@@ -995,6 +1022,7 @@ input, textarea, select { font: inherit; color: inherit; }
 .slash-item[data-active='true'] {
   background: color-mix(in srgb, var(--color-brass) 14%, var(--color-raised));
   color: var(--color-brass-hi);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-brass) 45%, transparent), 0 0 10px -2px color-mix(in srgb, var(--color-brass) 50%, transparent);
 }
 .slash-icon {
   display: grid;

@@ -102,6 +102,7 @@ export class Win32Worker {
           if (!settled) {
             settled = true
             reject(new Error('انتهت مهلة تشغيل محرك سطح المكتب Win32'))
+            try { child.kill() } catch {}
           }
         }, 12000)
 
@@ -137,15 +138,28 @@ export class Win32Worker {
         child.stderr.setEncoding('utf8')
         child.stderr.on('data', () => {})
 
-        child.on('exit', () => {
-          this.cleanupScript()
-          this.proc = null
-          this.readyPromise = null
-          for (const [, p] of this.pending) {
-            clearTimeout(p.timer)
-            p.reject(new Error('أُغلق محرك Win32'))
+        child.on('error', (e) => {
+          if (!settled) {
+            settled = true
+            clearTimeout(bootTimer)
+            reject(e)
           }
-          this.pending.clear()
+          if (this.proc === child) {
+            this.proc = null
+            this.readyPromise = null
+            this.rejectPending('تعذّر الاتصال بمحرك Win32')
+          }
+        })
+
+        child.on('exit', () => {
+          const ownsCurrent = this.proc === child
+          if (this.scriptPath === scriptPath) this.scriptPath = null
+          try { unlinkSync(scriptPath) } catch {}
+          if (ownsCurrent) {
+            this.proc = null
+            this.readyPromise = null
+            this.rejectPending('أُغلق محرك Win32')
+          }
           if (!settled) {
             settled = true
             clearTimeout(bootTimer)
@@ -170,8 +184,27 @@ export class Win32Worker {
       }, timeoutMs)
       this.pending.set(id, { resolve, reject, timer })
       const line = JSON.stringify({ id, cmd, ...payload }) + '\n'
-      this.proc!.stdin.write(line, 'utf8')
+      const failWrite = (e: Error) => {
+        const pending = this.pending.get(id)
+        if (!pending) return
+        this.pending.delete(id)
+        clearTimeout(pending.timer)
+        pending.reject(e)
+      }
+      try {
+        this.proc!.stdin.write(line, 'utf8', (e) => { if (e) failWrite(e) })
+      } catch (e) {
+        failWrite(e instanceof Error ? e : new Error(String(e)))
+      }
     })
+  }
+
+  private rejectPending(message: string) {
+    for (const [, p] of this.pending) {
+      clearTimeout(p.timer)
+      p.reject(new Error(message))
+    }
+    this.pending.clear()
   }
 
   private cleanupScript() {
@@ -181,11 +214,7 @@ export class Win32Worker {
   }
 
   destroy() {
-    for (const [, p] of this.pending) {
-      clearTimeout(p.timer)
-      p.reject(new Error('أُوقف محرك Win32'))
-    }
-    this.pending.clear()
+    this.rejectPending('أُوقف محرك Win32')
     this.cleanupScript()
     const child = this.proc
     this.proc = null

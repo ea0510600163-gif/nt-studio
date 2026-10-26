@@ -49,6 +49,41 @@ test('styleFromEndpoint: يميّز الأنماط الثلاثة', () => {
   assert.equal(styleFromEndpoint(''), undefined)
 })
 
+test('metaFromItem: تنسيق models.dev (limit + cost + modalities + provider.npm)', () => {
+  const meta = metaFromItem({
+    id: 'glm-5.3-flash',
+    limit: { context: 1_000_000, output: 131_072 },
+    modalities: { input: ['text', 'image'] },
+    tool_call: true,
+    cost: { input: 0.15, output: 0.5, cache_read: 0.03 },
+    provider: { npm: '@ai-sdk/openai-compatible' }
+  })
+  assert.equal(meta.contextWindow, 1_000_000)
+  assert.equal(meta.maxOutput, 131_072)
+  assert.equal(meta.vision, true)
+  assert.equal(meta.tools, true)
+  assert.deepEqual(meta.cost, { input: 0.15, output: 0.5, cacheRead: 0.03 })
+})
+
+test('metaFromItem: نموذج مجاني بسعر صفر يُقرأ كما هو ولا يُحذف', () => {
+  const meta = metaFromItem({
+    id: 'beam-free',
+    limit: { context: 1_048_576, output: 131_072 },
+    cost: { input: 0, output: 0, cache_read: 0 }
+  })
+  assert.deepEqual(meta.cost, { input: 0, output: 0, cacheRead: 0 })
+  assert.equal(meta.contextWindow, 1_048_576)
+})
+
+test('enrichModel: طبقة dev تسبق الكتالوج في الأسعار والحدود ولا تمسّ نمط النداء', () => {
+  const catalog = { contextWindow: 1_000_000, maxOutput: 131_072, apiStyle: 'responses', cost: { input: 1, output: 1 } }
+  const dev = { contextWindow: 1_050_000, apiStyle: 'openai', cost: { input: 0.1, output: 0.5, cacheRead: 0.01 } }
+  const m = enrichModel('whatever-x', { catalog, dev })
+  assert.equal(m.contextWindow, 1_050_000)
+  assert.equal(m.apiStyle, 'responses')
+  assert.deepEqual(m.cost, { input: 0.1, output: 0.5, cacheRead: 0.01 })
+})
+
 test('enrichModel: الأولوية للبيانات الحيّة ثم الكتالوج ثم نمط المزوّد', () => {
   const live = { contextWindow: 400_000 }
   const catalog = { contextWindow: 200_000, maxOutput: 64_000, vision: true }

@@ -17,6 +17,7 @@ interface SessionMeta {
   cumulativeSteps: number
   mode?: SessionMode
   memory?: AgentMemory | null
+  cost?: number
 }
 
 export interface PendingUserMessage {
@@ -30,6 +31,7 @@ export class Session {
   pending: PendingUserMessage[] = []
   asks = new Map<string, (v: string) => void>()
   children = new Set<AbortController>()
+  private childAbortHandlers = new Map<AbortController, () => void>()
   project: ProjectInfo | null = null
   constructor(
     public id: string,
@@ -43,12 +45,13 @@ export class Session {
     public runStartedAt: number | null = null,
     public cumulativeSteps = 0,
     public mode: SessionMode = 'studio',
-    public memory: AgentMemory | null = null
+    public memory: AgentMemory | null = null,
+    public cost = 0
   ) {
     if (projectId) this.project = getProject(projectId) ?? null
   }
   meta(): SessionMeta {
-    return { id: this.id, projectId: this.projectId, title: this.title, updatedAt: this.updatedAt, resumable: this.resumable, plan: this.plan, model: this.model, runStartedAt: this.runStartedAt, cumulativeSteps: this.cumulativeSteps, mode: this.mode, memory: this.memory }
+    return { id: this.id, projectId: this.projectId, title: this.title, updatedAt: this.updatedAt, resumable: this.resumable, plan: this.plan, model: this.model, runStartedAt: this.runStartedAt, cumulativeSteps: this.cumulativeSteps, mode: this.mode, memory: this.memory, cost: this.cost }
   }
   startRunBudget(now = Date.now()): void {
     this.runStartedAt = now
@@ -69,12 +72,19 @@ export class Session {
   }
   linkChild(): AbortController {
     const c = new AbortController()
+    const onAbort = () => c.abort()
     if (this.abort?.signal.aborted) c.abort()
-    else this.abort?.signal.addEventListener('abort', () => c.abort(), { once: true })
+    else if (this.abort) {
+      this.abort.signal.addEventListener('abort', onAbort, { once: true })
+      this.childAbortHandlers.set(c, onAbort)
+    }
     this.children.add(c)
     return c
   }
   unlinkChild(c: AbortController) {
+    const onAbort = this.childAbortHandlers.get(c)
+    if (onAbort) this.abort?.signal.removeEventListener('abort', onAbort)
+    this.childAbortHandlers.delete(c)
     this.children.delete(c)
   }
   abortAll() {
@@ -82,6 +92,7 @@ export class Session {
       try { c.abort() } catch {}
     }
     this.children.clear()
+    this.childAbortHandlers.clear()
     this.abort?.abort()
   }
 }
@@ -112,7 +123,7 @@ export function getSession(id: string): Session | undefined {
   if (hit) return hit
   const m = db().get<SessionMeta>('sessions', id)
   if (!m) return undefined
-  const s = new Session(m.id, m.projectId, m.title, db().msgs<Msg>(id), m.plan ?? [], m.model ?? null, m.resumable, m.updatedAt, m.runStartedAt ?? null, m.cumulativeSteps ?? 0, m.mode ?? 'studio', normalizeMemory(m.memory))
+  const s = new Session(m.id, m.projectId, m.title, db().msgs<Msg>(id), m.plan ?? [], m.model ?? null, m.resumable, m.updatedAt, m.runStartedAt ?? null, m.cumulativeSteps ?? 0, m.mode ?? 'studio', normalizeMemory(m.memory), m.cost ?? 0)
   remember(s)
   return s
 }

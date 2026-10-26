@@ -47,10 +47,10 @@ test('كتالوج OpenCode Go: كل نموذج يرى الصور مُعلَّم
   // القيم من models.dev (المزوّد opencode-go) — عمود `modalities.input` يحتوي image
   const vision = {
     'beam-free': false, 'deepseek-v4.1-flash': true, 'deepseek-v4-pro': false,
-    'gemini-4-argon-contributor': true, 'glm-5.2': false, 'glm-5.3': false, 'glm-5.3-flash': true,
-    'hy3': false, 'hy4-preview': false, 'kimi-k2.7-code': true, 'kimi-k3': true,
-    'longcat-2.0': false, 'longcat-2.5-preview-free': true, 'mimo-v2.5': true, 'mimo-v2.5-pro': false,
-    'mimo-v2.6-flash': true, 'mimo-v2.6-pro': true, 'minimax-m3.1-flash-free': true, 'step-5-preview': true,
+    'gemini-4-argon': true, 'glm-5.2': false, 'glm-5.3': false, 'glm-5.3-flash': true,
+    'hy3': false, 'hy4-preview': false, 'kimi-k2.7-code': true, 'kimi-k3': true, 'kimi-k3.1-pro': true,
+    'longcat-2.0': false, 'mimo-v2.5': true, 'mimo-v2.5-pro': false,
+    'mimo-v2.6-flash': true, 'mimo-v2.6-pro': true, 'minimax-m3.1-flash': true, 'step-5-preview': true,
     'claude-haiku-5-5': true, 'minimax-m3': true, 'qwen3.7-plus': true, 'qwen3.8-flash': true,
     'qwen3.8-max': true, 'gpt-5.6-luna': true, 'gpt-6-luna': true, 'grok-4.7': true,
     'muse-spark-1.2-contributor': true, 'muse-spark-1.3-contributor': true
@@ -63,7 +63,7 @@ test('كتالوج OpenCode Go: كل نموذج يرى الصور مُعلَّم
   // ما كان صامتاً: نموذج يرى الصور وكان vision=false فيُسقط الوكيل لقطاته
   for (const id of ['grok-4.7', 'muse-spark-1.2-contributor', 'muse-spark-1.3-contributor',
     'deepseek-v4.1-flash', 'kimi-k2.7-code', 'mimo-v2.5', 'qwen3.8-max', 'minimax-m3',
-    'gemini-4-argon-contributor', 'step-5-preview'])
+    'gemini-4-argon', 'step-5-preview'])
     assert.equal(OPENCODE_GO.models.find((m) => m.id === id).vision, true, `${id} يجب أن يرى الصور`)
 })
 
@@ -75,20 +75,21 @@ test('كتالوج OpenCode Go: المعرّفات غير مكرّرة وقوا�
 })
 
 test('كتالوج OpenCode Go: النماذج الجديدة في خطة الويب حاضرة بمسارها', () => {
-  // أُضيفت بعد لقطة أكتوبر الأولى: Step 5 Preview (غير المجاني)، Beam Free، Gemini 4 Argon Contributor
+  // أُضيفت بعد لقطة أكتوبر الأولى: Step 5 Preview (غير المجاني)، Beam Free، Kimi K3.1 Pro
   assert.equal(OPENCODE_GO.models.find((m) => m.id === 'step-5-preview')?.apiStyle, 'openai')
   assert.equal(OPENCODE_GO.models.find((m) => m.id === 'beam-free')?.apiStyle, 'openai')
   // الوثائق تنشر لـ Gemini النمط الرابع @ai-sdk/google؛ والعميل يعرف ثلاثة أنماط،
   // والبوّاب يقبل معرّفه على مسار openai-compatible ⇒ نوجّهه openai صراحةً ولا نتركه صامتاً
-  assert.equal(OPENCODE_GO.models.find((m) => m.id === 'gemini-4-argon-contributor')?.apiStyle, 'openai')
-  // أُضيف في تحديث 2026-10-20 حسب القائمة المنشورة: MiniMax M3.1 Flash Free
-  assert.equal(OPENCODE_GO.models.find((m) => m.id === 'minimax-m3.1-flash-free')?.apiStyle, 'openai')
+  assert.equal(OPENCODE_GO.models.find((m) => m.id === 'gemini-4-argon')?.apiStyle, 'openai')
+  // إعادة تسمية 2026-10: MiniMax M3.1 Flash صار معرّفه الرسمي بلا لاحقة -free
+  assert.equal(OPENCODE_GO.models.find((m) => m.id === 'minimax-m3.1-flash')?.apiStyle, 'openai')
 })
 
 test('كتالوج OpenCode Go: معرّفات خارج القائمة المنشورة لا تُدرج', () => {
-  // تحقّق حيّ 2026-10-20: space-bunny لم يعد منشوراً ولا يخدمه البوّاب، وموسوم deprecated في models.dev
-  // (وسابقاً: grok-4.5، space-bunny-free، step-5-preview-free يردّ عليها البوّاب بـ 400 Model is unavailable)
-  for (const dead of ['grok-4.5', 'space-bunny', 'space-bunny-free', 'step-5-preview-free'])
+  // تحقّق حيّ 2026-10-26: بواب Go لا يخدم ولا الوثائق تنشر المعرفات القديمة المصوبة
+  // (وسابقاً: grok-4.5، space-bunny، step-5-preview-free يردّ عليها البوّاب بـ 400)
+  for (const dead of ['grok-4.5', 'grok-4.6', 'glm-5.1', 'space-bunny', 'space-bunny-free', 'step-5-preview-free',
+    'gemini-4-argon-contributor', 'minimax-m3.1-flash-free', 'longcat-2.5-preview-free', 'longcat-2.5'])
     assert.equal(OPENCODE_GO.models.find((m) => m.id === dead), undefined, `${dead} يجب ألا يُدرج`)
 })
 
@@ -103,10 +104,29 @@ test('كتالوج OpenCode Go: نوافذ السياق وسقوف الإخرا�
   assert.equal(mo('kimi-k2.7-code'), 262_144)
   assert.equal(cw('grok-4.7'), 500_000)
   assert.equal(mo('grok-4.7'), 500_000)
-  assert.equal(cw('gemini-4-argon-contributor'), 1_048_576)
-  assert.equal(mo('gemini-4-argon-contributor'), 65_536)
-  assert.equal(cw('minimax-m3.1-flash-free'), 1_000_000)
-  assert.equal(mo('minimax-m3.1-flash-free'), 512_000)
+  assert.equal(cw('gemini-4-argon'), 1_048_576)
+  assert.equal(mo('gemini-4-argon'), 65_536)
+  assert.equal(cw('minimax-m3.1-flash'), 1_000_000)
+  assert.equal(mo('minimax-m3.1-flash'), 512_000)
+})
+
+test('كتالوج OpenCode Go: الأسعار مرفقة لكل نموذج وتطابق جدول الوثائق (دولار لكل مليون رمز)', () => {
+  // القيم من جدول أسعار Go المنشور (2026-10-26) — نفس طابق العملة للمستوى الأول لكل نموذج
+  const price = (id) => OPENCODE_GO.models.find((m) => m.id === id)?.cost
+  const free = price('beam-free')
+  assert.deepEqual(free, { input: 0, output: 0, cacheRead: 0 })
+  assert.deepEqual(price('glm-5.3-flash'), { input: 0.15, output: 0.5, cacheRead: 0.03 })
+  assert.deepEqual(price('glm-5.2'), { input: 1.4, output: 4.4, cacheRead: 0.26 })
+  assert.deepEqual(price('gpt-6-luna'), { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 })
+  assert.deepEqual(price('claude-haiku-5-5'), { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 })
+  assert.deepEqual(price('kimi-k3'), { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3 })
+  assert.deepEqual(price('qwen3.7-plus'), { input: 0.4, output: 1.6, cacheRead: 0.04, cacheWrite: 0.5 })
+  assert.deepEqual(price('deepseek-v4.1-flash'), { input: 0.15, output: 0.6, cacheRead: 0.003 })
+  for (const model of OPENCODE_GO.models) {
+    assert.ok(model.cost, `${model.id}: بلا سعر`)
+    assert.ok(Number.isFinite(model.cost.input) && model.cost.input >= 0, `${model.id}: سعر إدخال`)
+    assert.ok(Number.isFinite(model.cost.output) && model.cost.output >= 0, `${model.id}: سعر إخراج`)
+  }
 })
 
 test('Responses: نص متدفّق + استخدام + اكتمال', () => {

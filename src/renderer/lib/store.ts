@@ -38,7 +38,7 @@ interface State {
   phaseLabel: string
   running: boolean
   needsResume: boolean
-  usage: { tokens: number; window: number; step: number } | null
+  usage: { tokens: number; window: number; step: number; cost?: number } | null
   preview: PreviewState
   computer: ComputerState
   tab: Tab
@@ -210,8 +210,7 @@ export const useStore = create<State>((set, get) => ({
       }
       await get().refreshProjects()
       await get().refreshSessions()
-      const l = await nt.sessions.openLatest()
-      get().applyLoaded(l)
+      await get().newSession()
       set({ ready: true })
     })()
     try { await bootPromise }
@@ -566,7 +565,7 @@ export const useStore = create<State>((set, get) => ({
         }))
         break
       case 'usage':
-        set({ usage: { tokens: e.contextTokens, window: e.contextWindow, step: e.step } })
+        set({ usage: { tokens: e.contextTokens, window: e.contextWindow, step: e.step, cost: e.cost ?? get().usage?.cost } })
         break
       case 'run_end':
         set((s) => {

@@ -3,6 +3,7 @@ import { catalogFor } from '../../shared/catalogs.ts'
 import { enrichModel, metaFromItem, modelId } from '../../shared/modelMeta.ts'
 import type { ApiStyle, ModelInfo } from '../../shared/types.ts'
 import { anthropicBlocks, newAnthropicState, reduceAnthropic } from './anthropicParse.ts'
+import { devPatches } from './modelDev.ts'
 import { opencodeHeaders } from './opencode/headers.ts'
 import { responses } from './responses.ts'
 import { parseArgs, postSse } from './transport.ts'
@@ -14,6 +15,7 @@ import {
   type LlmHandlers,
   type LlmRequest,
   type LlmResult,
+  type LlmUsage,
   type Msg
 } from './types.ts'
 import { encodeMessagesXml, parseXmlCalls, xmlToolsPrompt } from './xmlTools.ts'
@@ -195,7 +197,7 @@ async function runOpenai(url: string, headers: Record<string, string>, body: unk
   const calls = new Map<number, { id: string; name: string; args: string }>()
   let finish = ''
   let completed = false
-  const usage = { input: 0, output: 0 }
+  const usage: LlmUsage = { input: 0, output: 0 }
   await postSse(url, headers, body, signal, (data) => {
     if (data === '[DONE]') {
       completed = true
@@ -210,6 +212,8 @@ async function runOpenai(url: string, headers: Record<string, string>, body: unk
     if (j.usage) {
       usage.input = j.usage.prompt_tokens ?? usage.input
       usage.output = j.usage.completion_tokens ?? usage.output
+      const cached = j.usage.prompt_tokens_details?.cached_tokens
+      if (typeof cached === 'number' && cached > 0) usage.cachedRead = Math.max(usage.cachedRead ?? 0, cached)
     }
     const ch = j.choices?.[0]
     if (!ch) return
@@ -238,6 +242,7 @@ async function runOpenai(url: string, headers: Record<string, string>, body: unk
     }
   }, idleMs, connectMs)
   if (!completed) throw new LlmError('انقطع البث قبل اكتمال الرد', undefined, true)
+  if (usage.cachedRead) usage.input = Math.max(0, usage.input - usage.cachedRead)
   const content: Block[] = []
   if (reasoning.trim()) content.push({ type: 'thinking', text: reasoning })
   if (text) content.push({ type: 'text', text })
@@ -350,12 +355,14 @@ export async function fetchModelList(baseUrl: string, apiKey: string, style: Api
   const j: any = await res.json()
   const items: unknown[] = j.data ?? j.models ?? []
   const catalog = catalogFor(baseUrl)
+  const patches = await devPatches(baseUrl)
   return items
     .map((item) => {
       const id = modelId(item)
       return enrichModel(id, {
         provider: style === 'openai' ? undefined : { apiStyle: style },
         catalog: catalog?.models.find((m) => m.id === id),
+        dev: patches.get(id),
         live: metaFromItem(item)
       })
     })
